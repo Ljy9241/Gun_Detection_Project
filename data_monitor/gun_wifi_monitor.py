@@ -10,9 +10,10 @@ from collections import deque
 from datetime import datetime
 
 import pyqtgraph as pg
-from PyQt5.QtCore import QObject, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -185,25 +186,56 @@ class MonitorWindow(QMainWindow):
         self.accel_plot = self.plot_widget.addPlot(row=0, col=0, title="三轴加速度原始 ADC 值")
         self.accel_plot.setLabel("bottom", "时间", units="s")
         self.accel_plot.showGrid(x=True, y=True, alpha=0.25)
+        # 将颜色说明和可见性开关叠放在图表右上角，复选框控制对应曲线。
         self.accel_curves = [
-            self.accel_plot.plot(pen=pg.mkPen("#d62728", width=1.5), name="X"),
-            self.accel_plot.plot(pen=pg.mkPen("#2ca02c", width=1.5), name="Y"),
-            self.accel_plot.plot(pen=pg.mkPen("#1f77b4", width=1.5), name="Z"),
+            self.accel_plot.plot(pen=pg.mkPen("#d62728", width=1.5)),
+            self.accel_plot.plot(pen=pg.mkPen("#2ca02c", width=1.5)),
+            self.accel_plot.plot(pen=pg.mkPen("#1f77b4", width=1.5)),
         ]
-        self.accel_plot.addLegend()
-
-        self.mic_plot = self.plot_widget.addPlot(row=1, col=0, title="声音与振动指标")
-        self.mic_plot.setLabel("bottom", "时间", units="s")
-        self.mic_plot.showGrid(x=True, y=True, alpha=0.25)
-        self.mic_curves = [
-            self.mic_plot.plot(pen=pg.mkPen("#9467bd", width=1.5), name="Mic P2P"),
-            self.mic_plot.plot(pen=pg.mkPen("#ff7f0e", width=1.5), name="Mic RMS"),
-            self.mic_plot.plot(pen=pg.mkPen("#17becf", width=1.5), name="振动幅值"),
-        ]
-        self.mic_plot.addLegend()
-        self.mic_plot.setXLink(self.accel_plot)
+        legend_panel = QWidget(self.plot_widget.viewport())
+        legend_layout = QVBoxLayout(legend_panel)
+        legend_layout.setContentsMargins(8, 5, 8, 5)
+        legend_layout.setSpacing(2)
+        legend_panel.setStyleSheet(
+            "QWidget { background-color: rgba(255, 255, 255, 220); "
+            "border: 1px solid #bbbbbb; border-radius: 4px; }"
+        )
+        self.axis_checks = []
+        axis_items = [("X  红色", "#d62728"), ("Y  绿色", "#2ca02c"), ("Z  蓝色", "#1f77b4")]
+        for curve, (label, color) in zip(self.accel_curves, axis_items):
+            check = QCheckBox(label, legend_panel)
+            check.setChecked(True)
+            check.setStyleSheet(f"QCheckBox {{ color: {color}; font-weight: bold; }}")
+            check.toggled.connect(curve.setVisible)
+            legend_layout.addWidget(check)
+            self.axis_checks.append(check)
+        legend_panel.adjustSize()
+        self.legend_panel = legend_panel
+        self.plot_widget.viewport().installEventFilter(self)
+        self._position_legend()
         main.setContentsMargins(8, 8, 8, 8)
         self.setCentralWidget(root)
+
+    def _position_legend(self):
+        """将轴颜色图例固定在绘图区域右上角。"""
+        if not hasattr(self, "legend_panel"):
+            return
+        margin = 14
+        self.legend_panel.move(
+            self.plot_widget.viewport().width() - self.legend_panel.width() - margin,
+            margin,
+        )
+
+    def resizeEvent(self, event):
+        """窗口尺寸变化时同步移动右上角图例。"""
+        super().resizeEvent(event)
+        self._position_legend()
+
+    def eventFilter(self, watched, event):
+        """绘图区视口尺寸改变时重新定位图例。"""
+        if watched is self.plot_widget.viewport() and event.type() == QEvent.Resize:
+            self._position_legend()
+        return super().eventFilter(watched, event)
 
     def toggle_listening(self):
         """根据当前接收线程状态开始或停止监听。"""
@@ -222,7 +254,7 @@ class MonitorWindow(QMainWindow):
         self.last_packet_time = time.time()
         kind = packet.get("type", "?")
         self.values["last_seen"].setText(
-            f"{datetime.now().strftime('%H:%M:%S')}  {packet.get('_sender', '')}  [{kind}]"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {packet.get('_sender', '')}  [{kind}]"
         )
         if kind == "status":
             self.handle_status(packet)
@@ -323,9 +355,6 @@ class MonitorWindow(QMainWindow):
         self.accel_curves[0].setData(xs, [self.as_float(r["vibration_x"]) for r in rows])
         self.accel_curves[1].setData(xs, [self.as_float(r["vibration_y"]) for r in rows])
         self.accel_curves[2].setData(xs, [self.as_float(r["vibration_z"]) for r in rows])
-        self.mic_curves[0].setData(xs, [self.as_float(r["mic_p2p"]) for r in rows])
-        self.mic_curves[1].setData(xs, [self.as_float(r["mic_rms"]) for r in rows])
-        self.mic_curves[2].setData(xs, [self.as_float(r["vibration_magnitude"]) for r in rows])
         if self.last_packet_time and time.time() - self.last_packet_time > 3:
             self.connection_label.setText("已超过 3 秒未收到数据")
 
@@ -342,7 +371,7 @@ class MonitorWindow(QMainWindow):
         self.samples.clear()
         self.x_values.clear()
         self.start_uptime = None
-        for curve in self.accel_curves + self.mic_curves:
+        for curve in self.accel_curves:
             curve.clear()
 
     def export_csv(self):
