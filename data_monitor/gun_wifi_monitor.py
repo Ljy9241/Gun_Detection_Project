@@ -167,9 +167,10 @@ class MonitorWindow(QMainWindow):
             ("device", "设备"), ("timestamp", "设备时间戳"),
             ("rssi", "WiFi 信号"), ("shots", "融合射击次数"),
             ("detection_counts", "检测次数"),
-            ("flags", "检测标志"), ("gps", "GPS 状态"),
-            ("coordinates", "经纬度"), ("gps_details", "GPS 信息"),
-            ("mic", "麦克风"), ("tilt", "静态倾斜角"),
+            ("flags", "检测标志"), ("gps_location", "GPS 定位"),
+            ("gps_details", "GPS 信息"),
+            ("mic", "麦克风"), ("accel", "三轴原始值"),
+            ("tilt", "静态倾斜角"),
             ("vibration", "振动量 / 变化量"),
             ("voice_event", "最近声音事件"), ("vibration_event", "最近振动事件"),
             ("last_shot", "最近射击事件"), ("last_seen", "最近数据"),
@@ -188,6 +189,18 @@ class MonitorWindow(QMainWindow):
                     count_layout.addWidget(label)
                     self.values[value_key] = label
                 layout.addLayout(count_layout)
+            elif key == "gps_location":
+                gps_location_layout = QHBoxLayout()
+                for value_key, initial in (
+                    ("gps", "GPS：—"),
+                    ("coordinates", "经纬度：—"),
+                ):
+                    label = QLabel(initial)
+                    label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    label.setWordWrap(True)
+                    gps_location_layout.addWidget(label)
+                    self.values[value_key] = label
+                layout.addLayout(gps_location_layout)
             elif key == "gps_details":
                 gps_layout = QHBoxLayout()
                 for value_key, initial in (
@@ -356,15 +369,19 @@ class MonitorWindow(QMainWindow):
             f"声音：{'触发' if flags.get('voice') else '无'}；振动：{'触发' if flags.get('vibration') else '无'}"
         )
         valid = bool(gps.get("valid", False))
-        self.values["gps"].setText("有效" if valid else "无有效定位")
+        self.values["gps"].setText(f"GPS：{'有效' if valid else '无有效定位'}")
         self.values["coordinates"].setText(
-            f"{self.number(gps.get('latitude'), 7)}, {self.number(gps.get('longitude'), 7)}"
+            f"经纬度：{self.number(gps.get('latitude'), 7)}, "
+            f"{self.number(gps.get('longitude'), 7)}"
         )
         self.values["altitude"].setText(f"海拔：{self.number(gps.get('altitudeM'))} m")
         self.values["speed"].setText(f"速度：{self.number(gps.get('speedKmph'))} km/h")
         self.values["satellites"].setText(f"卫星数：{gps.get('satellites', '—')}")
         self.values["mic"].setText(
             f"raw {mic.get('raw', '—')}   P2P {mic.get('p2p', '—')}   RMS {self.number(mic.get('rms'))}"
+        )
+        self.values["accel"].setText(
+            f"X {vibration.get('x', '—')}   Y {vibration.get('y', '—')}   Z {vibration.get('z', '—')}"
         )
         if tilt.get("valid", False):
             self.values["tilt"].setText(
@@ -407,7 +424,10 @@ class MonitorWindow(QMainWindow):
                 f"P2P {packet.get('peakToPeak', '—')}，RMS {self.number(packet.get('rms'))}，"
                 f"突增 {self.number(packet.get('riseRatio'), 2)}"
             )
-            self.values["voice_event"].setText(f"声音事件：{timestamp}  #{count}  {details}")
+            self.values["voice_event"].setText(
+                f"声音事件：{timestamp}\n"
+                f"#{count}  {details}"
+            )
         elif detection_type == "vibration":
             self.update_detection_count("vibration_count", count, "振动")
             details = (
@@ -415,7 +435,10 @@ class MonitorWindow(QMainWindow):
                 f"变化 {self.number(packet.get('peakJerk'))}，"
                 f"三轴 {packet.get('x', '—')}/{packet.get('y', '—')}/{packet.get('z', '—')}"
             )
-            self.values["vibration_event"].setText(f"振动事件：{timestamp}  #{count}  {details}")
+            self.values["vibration_event"].setText(
+                f"振动事件：{timestamp}\n"
+                f"#{count}  {details}"
+            )
 
     def update_detection_count(self, key, count, label):
         """避免延迟到达的旧事件包让界面上的累计次数倒退。"""

@@ -52,6 +52,11 @@ private:
     float angleZeroY_ = 0.0F;
     float angleZeroZ_ = 0.0F;
     float countsPerG_ = 0.0F;
+    float angleZSign_ = 1.0F;
+    float angleCalibrationSumX_ = 0.0F;
+    float angleCalibrationSumY_ = 0.0F;
+    float angleCalibrationSumZ_ = 0.0F;
+    uint16_t angleCalibrationCount_ = 0;
     float filteredAccelX_ = 0.0F;
     float filteredAccelY_ = 0.0F;
     float filteredAccelZ_ = 1.0F;
@@ -70,6 +75,7 @@ private:
     bool candidateSaturated_ = false;
     bool calibrated_ = false;
     bool angleValid_ = false;
+    bool angleCalibrationComplete_ = false;
     bool angleFilterInitialized_ = false;
     bool eventPending_ = false;
     VibrateEvent pendingEvent_;
