@@ -49,9 +49,47 @@ void VibrateDetection::update(uint64_t nowUs) {
             baselineX_ = calibrationSumX_ / calibrationCount_;
             baselineY_ = calibrationSumY_ / calibrationCount_;
             baselineZ_ = calibrationSumZ_ / calibrationCount_;
+            // 开机校准要求传感器水平静止：X/Y 为零重力基准，Z 轴承受约 1g。
+            angleZeroX_ = baselineX_;
+            angleZeroY_ = baselineY_;
+            angleZeroZ_ = (baselineX_ + baselineY_) * 0.5F;
+            const float zGravity = baselineZ_ - angleZeroZ_;
+            countsPerG_ = fabsf(zGravity);
+            angleValid_ = countsPerG_ >= 10.0F;
+            if (angleValid_) {
+                // 统一 Z 轴正方向，使水平校准姿态的重力分量为 +1g。
+                const float zSign = zGravity >= 0.0F ? 1.0F : -1.0F;
+                filteredAccelX_ = 0.0F;
+                filteredAccelY_ = 0.0F;
+                filteredAccelZ_ = zSign * zGravity / countsPerG_;
+                angleFilterInitialized_ = true;
+            }
             calibrated_ = true;
         }
         return;
+    }
+
+    if (angleValid_) {
+        const float zSign = (baselineZ_ - angleZeroZ_) >= 0.0F ? 1.0F : -1.0F;
+        const float accelX = (rawX_ - angleZeroX_) * zSign / countsPerG_;
+        const float accelY = (rawY_ - angleZeroY_) * zSign / countsPerG_;
+        const float accelZ = (rawZ_ - angleZeroZ_) * zSign / countsPerG_;
+        if (!angleFilterInitialized_) {
+            filteredAccelX_ = accelX;
+            filteredAccelY_ = accelY;
+            filteredAccelZ_ = accelZ;
+            angleFilterInitialized_ = true;
+        } else {
+            constexpr float alpha = 0.02F;
+            filteredAccelX_ += alpha * (accelX - filteredAccelX_);
+            filteredAccelY_ += alpha * (accelY - filteredAccelY_);
+            filteredAccelZ_ += alpha * (accelZ - filteredAccelZ_);
+        }
+        constexpr float radiansToDegrees = 57.2957795F;
+        rollDegrees_ = atan2f(filteredAccelY_, filteredAccelZ_) * radiansToDegrees;
+        pitchDegrees_ = atan2f(-filteredAccelX_,
+                               sqrtf(filteredAccelY_ * filteredAccelY_ +
+                                     filteredAccelZ_ * filteredAccelZ_)) * radiansToDegrees;
     }
 
     // 去除各轴静态基线后计算三维偏移幅值，并用相邻幅值差近似冲击变化率。

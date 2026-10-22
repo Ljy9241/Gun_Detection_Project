@@ -17,6 +17,9 @@ struct WifiTelemetry {
     uint16_t vibrationZ = 0;
     float vibrationMagnitude = 0.0F;
     float vibrationJerk = 0.0F;
+    bool tiltValid = false;
+    float rollDegrees = 0.0F;
+    float pitchDegrees = 0.0F;
     bool voiceFlag = false;
     bool vibrationFlag = false;
     bool gpsValid = false;

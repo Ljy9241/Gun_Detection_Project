@@ -37,7 +37,8 @@ CSV_FIELDS = [
     "received_at", "uptime_ms", "device_id", "rssi", "shot_count",
     "voice_detection_count", "vibration_detection_count",
     "mic_raw", "mic_p2p", "mic_rms", "vibration_x", "vibration_y",
-    "vibration_z", "vibration_magnitude", "vibration_jerk", "gps_valid",
+    "vibration_z", "vibration_magnitude", "vibration_jerk", "roll_deg",
+    "pitch_deg", "gps_valid",
     "latitude", "longitude", "altitude_m", "speed_kmph", "satellites",
 ]
 
@@ -168,7 +169,7 @@ class MonitorWindow(QMainWindow):
             ("detection_counts", "检测次数"),
             ("flags", "检测标志"), ("gps", "GPS 状态"),
             ("coordinates", "经纬度"), ("gps_details", "GPS 信息"),
-            ("mic", "麦克风"), ("accel", "三轴原始值"),
+            ("mic", "麦克风"), ("tilt", "静态倾斜角"),
             ("vibration", "振动量 / 变化量"),
             ("voice_event", "最近声音事件"), ("vibration_event", "最近振动事件"),
             ("last_shot", "最近射击事件"), ("last_seen", "最近数据"),
@@ -310,6 +311,7 @@ class MonitorWindow(QMainWindow):
         device_timestamp = packet.get("timestamp") if packet.get("timestampValid", False) else None
         mic = packet.get("mic") or {}
         vibration = packet.get("vibration") or {}
+        tilt = packet.get("tilt") or {}
         gps = packet.get("gps") or {}
         flags = packet.get("flags") or {}
         uptime = packet.get("uptimeMs")
@@ -337,6 +339,8 @@ class MonitorWindow(QMainWindow):
             "vibration_z": vibration.get("z", ""),
             "vibration_magnitude": vibration.get("magnitude", ""),
             "vibration_jerk": vibration.get("jerk", ""),
+            "roll_deg": tilt.get("rollDeg", ""),
+            "pitch_deg": tilt.get("pitchDeg", ""),
             "gps_valid": gps.get("valid", ""),
             "latitude": gps.get("latitude", ""), "longitude": gps.get("longitude", ""),
             "altitude_m": gps.get("altitudeM", ""),
@@ -362,9 +366,13 @@ class MonitorWindow(QMainWindow):
         self.values["mic"].setText(
             f"raw {mic.get('raw', '—')}   P2P {mic.get('p2p', '—')}   RMS {self.number(mic.get('rms'))}"
         )
-        self.values["accel"].setText(
-            f"X {vibration.get('x', '—')}   Y {vibration.get('y', '—')}   Z {vibration.get('z', '—')}"
-        )
+        if tilt.get("valid", False):
+            self.values["tilt"].setText(
+                f"横滚：{self.number(tilt.get('rollDeg'))}°   "
+                f"俯仰：{self.number(tilt.get('pitchDeg'))}°"
+            )
+        else:
+            self.values["tilt"].setText("校准中或角度无效")
         self.values["vibration"].setText(
             f"幅值 {self.number(vibration.get('magnitude'))}   变化 {self.number(vibration.get('jerk'))}"
         )

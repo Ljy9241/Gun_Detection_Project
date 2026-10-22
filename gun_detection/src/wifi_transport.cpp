@@ -84,7 +84,7 @@ void WifiTransport::update(uint32_t nowMs) {
 
 bool WifiTransport::sendStatus(uint32_t nowMs) {
     // 状态包使用 JSON，字段结构与 data_show/gun_wifi_monitor.py 的解析保持一致。
-    char payload[768];
+    char payload[1024];
     char timestamp[20];
     const bool timestampValid = formatRtcTimestamp(timestamp, sizeof(timestamp));
     const String localIp = WiFi.localIP().toString();
@@ -98,6 +98,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"vibration\":{\"ready\":%s,\"x\":%u,\"y\":%u,\"z\":%u,"
         "\"magnitude\":%.1f,\"jerk\":%.1f,\"maxMagnitude5s\":%.1f,"
         "\"maxJerk5s\":%.1f},"
+        "\"tilt\":{\"valid\":%s,\"rollDeg\":%.1f,\"pitchDeg\":%.1f},"
         "\"flags\":{\"voice\":%s,\"vibration\":%s},"
         "\"shotCount\":%lu,\"voiceDetectionCount\":%lu,"
         "\"vibrationDetectionCount\":%lu,\"sentShots\":%lu,"
@@ -114,6 +115,8 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         telemetry_.vibrationReady ? "true" : "false", telemetry_.vibrationX,
         telemetry_.vibrationY, telemetry_.vibrationZ, telemetry_.vibrationMagnitude,
         telemetry_.vibrationJerk, windowVibrationMagnitude_, windowVibrationJerk_,
+        telemetry_.tiltValid ? "true" : "false", telemetry_.rollDegrees,
+        telemetry_.pitchDegrees,
         telemetry_.voiceFlag ? "true" : "false",
         telemetry_.vibrationFlag ? "true" : "false",
         static_cast<unsigned long>(telemetry_.shotCount),

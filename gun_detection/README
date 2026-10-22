@@ -45,6 +45,11 @@ Each voice or vibration trigger is also queued and uploaded as its own `detectio
 counts and the latest event details separately. Fused detections continue to upload as `shot`
 events.
 
+Static roll/pitch estimates use the MMA7361 axes after a 2-second startup calibration.
+Keep the sensor level and motionless during startup calibration. The status packet reports
+`tilt.rollDeg` and `tilt.pitchDeg`; these accelerometer-only angles are intended for static or
+slow tilt and are affected by firing and other linear acceleration.
+
 ## Build
 
 ```sh

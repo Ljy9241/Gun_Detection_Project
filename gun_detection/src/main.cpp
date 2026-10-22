@@ -97,6 +97,9 @@ void loop() {
     telemetry.vibrationZ = vibrateDetection.rawZ();
     telemetry.vibrationMagnitude = vibrateDetection.magnitude();
     telemetry.vibrationJerk = vibrateDetection.jerk();
+    telemetry.tiltValid = vibrateDetection.angleValid();
+    telemetry.rollDegrees = vibrateDetection.rollDegrees();
+    telemetry.pitchDegrees = vibrateDetection.pitchDegrees();
     telemetry.voiceFlag = shotDetector.flag1();
     telemetry.vibrationFlag = shotDetector.flag2();
     telemetry.gpsValid = fix.valid;

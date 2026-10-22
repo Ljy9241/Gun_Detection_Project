@@ -29,7 +29,7 @@ inline constexpr uint32_t VOICE_RETRIGGER_US = 50000;
 
 // MMA7361 振动检测参数；PCB 将 G-SELECT 拉高，因此量程为 +/-6 g。
 inline constexpr uint32_t VIBRATE_SAMPLE_RATE_HZ = 1000;
-inline constexpr uint16_t VIBRATE_CALIBRATION_SAMPLES = 300;
+inline constexpr uint16_t VIBRATE_CALIBRATION_SAMPLES = 2000;  // 2 s stationary startup calibration
 inline constexpr float VIBRATE_PEAK_THRESHOLD_COUNTS = 300.0F;
 inline constexpr float VIBRATE_JERK_THRESHOLD_COUNTS = 150.0F;
 inline constexpr float VIBRATE_QUIET_THRESHOLD_COUNTS = 90.0F;

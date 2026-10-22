@@ -27,6 +27,9 @@ public:
     uint16_t rawZ() const { return rawZ_; }
     float magnitude() const { return magnitude_; }
     float jerk() const { return jerk_; }
+    bool angleValid() const { return angleValid_; }
+    float rollDegrees() const { return rollDegrees_; }
+    float pitchDegrees() const { return pitchDegrees_; }
     uint32_t droppedSamples() const { return droppedSamples_; }
 
 private:
@@ -45,6 +48,15 @@ private:
     float baselineX_ = 0.0F;
     float baselineY_ = 0.0F;
     float baselineZ_ = 0.0F;
+    float angleZeroX_ = 0.0F;
+    float angleZeroY_ = 0.0F;
+    float angleZeroZ_ = 0.0F;
+    float countsPerG_ = 0.0F;
+    float filteredAccelX_ = 0.0F;
+    float filteredAccelY_ = 0.0F;
+    float filteredAccelZ_ = 1.0F;
+    float rollDegrees_ = 0.0F;
+    float pitchDegrees_ = 0.0F;
     float previousMagnitude_ = 0.0F;
     float magnitude_ = 0.0F;
     float jerk_ = 0.0F;
@@ -57,6 +69,8 @@ private:
     float candidatePeakJerk_ = 0.0F;
     bool candidateSaturated_ = false;
     bool calibrated_ = false;
+    bool angleValid_ = false;
+    bool angleFilterInitialized_ = false;
     bool eventPending_ = false;
     VibrateEvent pendingEvent_;
 };
