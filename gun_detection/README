@@ -31,6 +31,20 @@ Edit `include/system_config.h` before hardware/network testing:
 
 With Wi-Fi settings left empty, upload is disabled but detection, GPS and serial diagnostics continue.
 
+The firmware synchronizes the ESP32 system RTC from valid GPS UTC date/time. UDP status and
+shot packets include `timestamp` in `YYYY-MM-DD HH:MM:SS` format and `timestampValid`.
+The RTC continues running while Wi-Fi is disconnected. After a full power loss, a valid GPS
+time is required to initialize the calendar clock again; this board configuration has no
+separate battery-backed RTC module. When no valid RTC time is available, the timestamp is empty
+and `timestampValid` is false. The monitor uses the device timestamp for its display and CSV
+when available, and falls back to the computer receive time otherwise.
+
+Each voice or vibration trigger is also queued and uploaded as its own `detection` UDP event
+(`detectionType` is `voice` or `vibration`). Status packets include cumulative
+`voiceDetectionCount` and `vibrationDetectionCount` values since boot; the monitor displays both
+counts and the latest event details separately. Fused detections continue to upload as `shot`
+events.
+
 ## Build
 
 ```sh

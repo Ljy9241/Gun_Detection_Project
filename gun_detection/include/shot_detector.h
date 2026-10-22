@@ -11,6 +11,7 @@ struct ShotEvent {
     uint32_t shotId = 0;
     uint32_t shotCount = 0;
     uint64_t timestampUs = 0;
+    char timestamp[20] = {};  // RTC 时间，格式 YYYY-MM-DD HH:MM:SS；未校时则为空。
     VoiceEvent voice;
     VibrateEvent vibration;
     GpsFix gps;

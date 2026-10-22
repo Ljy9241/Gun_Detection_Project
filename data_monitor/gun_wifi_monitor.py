@@ -35,6 +35,7 @@ HISTORY_SECONDS = 60
 UI_REFRESH_MS = 100
 CSV_FIELDS = [
     "received_at", "uptime_ms", "device_id", "rssi", "shot_count",
+    "voice_detection_count", "vibration_detection_count",
     "mic_raw", "mic_p2p", "mic_rms", "vibration_x", "vibration_y",
     "vibration_z", "vibration_magnitude", "vibration_jerk", "gps_valid",
     "latitude", "longitude", "altitude_m", "speed_kmph", "satellites",
@@ -125,6 +126,7 @@ class MonitorWindow(QMainWindow):
         self.start_uptime = None
         self.last_packet_time = None
         self.shot_count = 0
+        self.detection_counts = {"voice_count": 0, "vibration_count": 0}
         self._build_ui()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_display)
@@ -161,22 +163,51 @@ class MonitorWindow(QMainWindow):
         summary = QGridLayout()
         self.values = {}
         fields = [
-            ("device", "设备"), ("rssi", "WiFi 信号"), ("shots", "检测次数"),
+            ("device", "设备"), ("timestamp", "设备时间戳"),
+            ("rssi", "WiFi 信号"), ("shots", "融合射击次数"),
+            ("detection_counts", "检测次数"),
             ("flags", "检测标志"), ("gps", "GPS 状态"),
-            ("coordinates", "经纬度"), ("altitude", "海拔"),
-            ("speed", "速度"), ("satellites", "卫星数"),
+            ("coordinates", "经纬度"), ("gps_details", "GPS 信息"),
             ("mic", "麦克风"), ("accel", "三轴原始值"),
             ("vibration", "振动量 / 变化量"),
-            ("last_shot", "最近事件"), ("last_seen", "最近数据"),
+            ("voice_event", "最近声音事件"), ("vibration_event", "最近振动事件"),
+            ("last_shot", "最近射击事件"), ("last_seen", "最近数据"),
         ]
         for index, (key, title) in enumerate(fields):
             box = QGroupBox(title)
             layout = QVBoxLayout(box)
-            label = QLabel("—")
-            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            label.setWordWrap(True)
-            layout.addWidget(label)
-            self.values[key] = label
+            if key == "detection_counts":
+                count_layout = QHBoxLayout()
+                for value_key, initial in (
+                    ("voice_count", "声音：0 次"),
+                    ("vibration_count", "振动：0 次"),
+                ):
+                    label = QLabel(initial)
+                    label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    count_layout.addWidget(label)
+                    self.values[value_key] = label
+                layout.addLayout(count_layout)
+            elif key == "gps_details":
+                gps_layout = QHBoxLayout()
+                for value_key, initial in (
+                    ("altitude", "海拔：— m"),
+                    ("speed", "速度：— km/h"),
+                    ("satellites", "卫星数：—"),
+                ):
+                    label = QLabel(initial)
+                    label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    gps_layout.addWidget(label)
+                    self.values[value_key] = label
+                layout.addLayout(gps_layout)
+            else:
+                initial = "声音事件：—" if key == "voice_event" else (
+                    "振动事件：—" if key == "vibration_event" else "—"
+                )
+                label = QLabel(initial)
+                label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                label.setWordWrap(True)
+                layout.addWidget(label)
+                self.values[key] = label
             summary.addWidget(box, index // 4, index % 4)
         main.addLayout(summary)
 
@@ -253,13 +284,18 @@ class MonitorWindow(QMainWindow):
         """记录收到数据的时间，并按协议类型分发状态包或射击事件包。"""
         self.last_packet_time = time.time()
         kind = packet.get("type", "?")
+        device_timestamp = packet.get("timestamp") if packet.get("timestampValid", False) else None
+        self.values["timestamp"].setText(device_timestamp or "未校准")
         self.values["last_seen"].setText(
-            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  {packet.get('_sender', '')}  [{kind}]"
+            f"{device_timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S')}  "
+            f"{packet.get('_sender', '')}  [{kind}]"
         )
         if kind == "status":
             self.handle_status(packet)
         elif kind == "shot":
             self.handle_shot(packet)
+        elif kind == "detection":
+            self.handle_detection(packet)
 
     @staticmethod
     def number(value, digits=1):
@@ -271,6 +307,7 @@ class MonitorWindow(QMainWindow):
 
     def handle_status(self, packet):
         """更新实时状态卡片，并将状态样本存入曲线缓存和 CSV 缓存。"""
+        device_timestamp = packet.get("timestamp") if packet.get("timestampValid", False) else None
         mic = packet.get("mic") or {}
         vibration = packet.get("vibration") or {}
         gps = packet.get("gps") or {}
@@ -286,11 +323,13 @@ class MonitorWindow(QMainWindow):
         elapsed = max(0.0, (uptime - self.start_uptime) / 1000.0)
 
         row = {
-            "received_at": datetime.now().isoformat(timespec="milliseconds"),
+            "received_at": device_timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "uptime_ms": uptime,
             "device_id": packet.get("deviceId", ""),
             "rssi": packet.get("rssi", ""),
             "shot_count": packet.get("shotCount", ""),
+            "voice_detection_count": packet.get("voiceDetectionCount", ""),
+            "vibration_detection_count": packet.get("vibrationDetectionCount", ""),
             "mic_raw": mic.get("raw", ""), "mic_p2p": mic.get("p2p", ""),
             "mic_rms": mic.get("rms", ""),
             "vibration_x": vibration.get("x", ""),
@@ -317,9 +356,9 @@ class MonitorWindow(QMainWindow):
         self.values["coordinates"].setText(
             f"{self.number(gps.get('latitude'), 7)}, {self.number(gps.get('longitude'), 7)}"
         )
-        self.values["altitude"].setText(f"{self.number(gps.get('altitudeM'))} m")
-        self.values["speed"].setText(f"{self.number(gps.get('speedKmph'))} km/h")
-        self.values["satellites"].setText(str(gps.get("satellites", "—")))
+        self.values["altitude"].setText(f"海拔：{self.number(gps.get('altitudeM'))} m")
+        self.values["speed"].setText(f"速度：{self.number(gps.get('speedKmph'))} km/h")
+        self.values["satellites"].setText(f"卫星数：{gps.get('satellites', '—')}")
         self.values["mic"].setText(
             f"raw {mic.get('raw', '—')}   P2P {mic.get('p2p', '—')}   RMS {self.number(mic.get('rms'))}"
         )
@@ -330,6 +369,8 @@ class MonitorWindow(QMainWindow):
             f"幅值 {self.number(vibration.get('magnitude'))}   变化 {self.number(vibration.get('jerk'))}"
         )
         self.shot_count = int(packet.get("shotCount", self.shot_count) or 0)
+        self.update_detection_count("voice_count", packet.get("voiceDetectionCount", 0), "声音")
+        self.update_detection_count("vibration_count", packet.get("vibrationDetectionCount", 0), "振动")
         if len(self.x_values) > 1:
             left = max(0.0, elapsed - HISTORY_SECONDS)
             self.accel_plot.setXRange(left, max(HISTORY_SECONDS, elapsed), padding=0)
@@ -341,10 +382,38 @@ class MonitorWindow(QMainWindow):
         self.values["shots"].setText(str(self.shot_count))
         lat, lon = packet.get("latitude"), packet.get("longitude")
         location = f"GPS {self.number(lat, 7)}, {self.number(lon, 7)}" if packet.get("gpsValid") else "GPS 无效"
+        timestamp = packet.get("timestamp") if packet.get("timestampValid", False) else "未校准"
         self.values["last_shot"].setText(
-            f"#{shot_id}  声音 P2P {packet.get('voiceP2P', '—')}  "
+            f"{timestamp}  #{shot_id}  声音 P2P {packet.get('voiceP2P', '—')}  "
             f"振动峰值 {self.number(packet.get('accelPeak'))}  {location}"
         )
+
+    def handle_detection(self, packet):
+        """分别更新声音或振动检测累计数和最近一次独立触发事件。"""
+        detection_type = packet.get("detectionType")
+        count = int(packet.get("detectionCount", 0) or 0)
+        timestamp = packet.get("timestamp") if packet.get("timestampValid", False) else "未校准"
+        if detection_type == "voice":
+            self.update_detection_count("voice_count", count, "声音")
+            details = (
+                f"P2P {packet.get('peakToPeak', '—')}，RMS {self.number(packet.get('rms'))}，"
+                f"突增 {self.number(packet.get('riseRatio'), 2)}"
+            )
+            self.values["voice_event"].setText(f"声音事件：{timestamp}  #{count}  {details}")
+        elif detection_type == "vibration":
+            self.update_detection_count("vibration_count", count, "振动")
+            details = (
+                f"峰值 {self.number(packet.get('peakMagnitude'))}，"
+                f"变化 {self.number(packet.get('peakJerk'))}，"
+                f"三轴 {packet.get('x', '—')}/{packet.get('y', '—')}/{packet.get('z', '—')}"
+            )
+            self.values["vibration_event"].setText(f"振动事件：{timestamp}  #{count}  {details}")
+
+    def update_detection_count(self, key, count, label):
+        """避免延迟到达的旧事件包让界面上的累计次数倒退。"""
+        current = self.detection_counts[key]
+        self.detection_counts[key] = max(current, int(count or 0))
+        self.values[key].setText(f"{label}：{self.detection_counts[key]} 次")
 
     def refresh_display(self):
         """由 Qt 定时器批量刷新曲线，并提示数据流中断。"""

@@ -30,6 +30,8 @@ struct WifiTelemetry {
     uint32_t gpsCharacters = 0;
     uint32_t gpsFailedChecksums = 0;
     uint32_t shotCount = 0;
+    uint32_t voiceDetectionCount = 0;
+    uint32_t vibrationDetectionCount = 0;
     uint32_t voiceDroppedSamples = 0;
     uint32_t vibrationDroppedSamples = 0;
 };
@@ -41,6 +43,8 @@ public:
     void setTelemetry(const WifiTelemetry& telemetry);
     void update(uint32_t nowMs);
     bool enqueue(const ShotEvent& event);
+    bool enqueueVoiceDetection(const VoiceEvent& event, uint32_t detectionCount);
+    bool enqueueVibrationDetection(const VibrateEvent& event, uint32_t detectionCount);
 
     bool enabled() const { return enabled_; }
     bool connected() const { return WiFi.status() == WL_CONNECTED; }
@@ -52,13 +56,22 @@ public:
 
 private:
     static constexpr uint8_t QUEUE_SIZE = 16;
-    // 发送队列中的射击事件；失败时保留队首等待后续重试。
-    bool send(const ShotEvent& event);
+    enum class EventType : uint8_t { Shot, Voice, Vibration };
+    struct QueuedEvent {
+        EventType type = EventType::Shot;
+        ShotEvent shot;
+        VoiceEvent voice;
+        VibrateEvent vibration;
+        uint32_t detectionCount = 0;
+        char timestamp[20] = {};
+    };
+    bool enqueueEvent(const QueuedEvent& event);
+    bool send(const QueuedEvent& event);
     // 上报周期状态包及最近一个统计窗口的传感器峰值。
     bool sendStatus(uint32_t nowMs);
 
     WiFiUDP udp_;
-    ShotEvent queue_[QUEUE_SIZE];
+    QueuedEvent queue_[QUEUE_SIZE];
     uint8_t head_ = 0;  // 下一个写入位置。
     uint8_t tail_ = 0;
     uint8_t count_ = 0;

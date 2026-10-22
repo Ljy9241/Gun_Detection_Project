@@ -16,6 +16,8 @@ ShotDetector shotDetector;
 WifiTransport wifiTransport;
 
 uint32_t lastDiagnosticMs = 0;
+uint32_t voiceDetectionCount = 0;
+uint32_t vibrationDetectionCount = 0;
 
 static void printShot(const ShotEvent& shot) {
     // 输出融合事件摘要，便于不连接上位机时通过串口检查检测结果。
@@ -59,16 +61,20 @@ void loop() {
 
     VoiceEvent voiceEvent;
     if (voiceDetection.consumeEvent(voiceEvent)) {
+        ++voiceDetectionCount;
         Serial.printf("VOICE TRIGGER p2p=%u rms=%.1f rise=%.2f\n", voiceEvent.peakToPeak,
                       voiceEvent.rms, voiceEvent.riseRatio);
+        wifiTransport.enqueueVoiceDetection(voiceEvent, voiceDetectionCount);
         shotDetector.onVoiceEvent(voiceEvent);
     }
 
     VibrateEvent vibrateEvent;
     if (vibrateDetection.consumeEvent(vibrateEvent)) {
+        ++vibrationDetectionCount;
         Serial.printf("VIB TRIGGER peak=%.1f jerk=%.1f sat=%s\n",
                       vibrateEvent.peakMagnitude, vibrateEvent.peakJerk,
                       vibrateEvent.saturated ? "yes" : "no");
+        wifiTransport.enqueueVibrationDetection(vibrateEvent, vibrationDetectionCount);
         shotDetector.onVibrateEvent(vibrateEvent);
     }
 
@@ -104,6 +110,8 @@ void loop() {
     telemetry.gpsCharacters = gps.parsedCharacters();
     telemetry.gpsFailedChecksums = gps.failedChecksums();
     telemetry.shotCount = shotDetector.shotCount();
+    telemetry.voiceDetectionCount = voiceDetectionCount;
+    telemetry.vibrationDetectionCount = vibrationDetectionCount;
     telemetry.voiceDroppedSamples = voiceDetection.droppedSamples();
     telemetry.vibrationDroppedSamples = vibrateDetection.droppedSamples();
     wifiTransport.setTelemetry(telemetry);

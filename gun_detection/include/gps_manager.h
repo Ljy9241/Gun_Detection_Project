@@ -31,4 +31,5 @@ private:
     TinyGPSPlus gps_;
     uint8_t enablePin_ = 0;
     uint8_t ppsPin_ = 0;
+    uint32_t lastClockSyncEpoch_ = 0;
 };
