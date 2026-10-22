@@ -1,0 +1,40 @@
+# ESP32-S3 gun detection firmware
+
+First functional version: all sensing circuits, the ESP32-S3, GPS and Wi-Fi remain active.
+No light/deep-sleep logic is enabled yet.
+
+## Pin assignment
+
+| Function | GPIO |
+|---|---:|
+| Microphone ADC | 8 |
+| MMA7361 X/Y/Z | 4 / 5 / 6 |
+| MMA7361 SLEEP | 7 (HIGH = active) |
+| GPS EN / PPS | 9 / 10 |
+| ESP32 UART TX / RX | 17 / 18 |
+
+## Modules
+
+- `voice_detection`: continuous 8 kHz sampling, 10 ms frame P2P/RMS/energy-rise detection.
+- `vibrate_detection`: 1 kHz three-axis sampling, baseline, magnitude and jerk detection.
+- `shot_detector`: time-window fusion and duplicate-shot suppression.
+- `gps_manager`: continuous NMEA parsing through UART1.
+- `wifi_transport`: non-blocking connection management and UDP/JSON event queue.
+
+## Configuration
+
+Edit `include/system_config.h` before hardware/network testing:
+
+- Calibrate the voice and vibration thresholds from serial output.
+- Set `WIFI_SSID`, `WIFI_PASSWORD`, `UPPER_COMPUTER_HOST` and port.
+- Verify the GPS baud rate and that its EN pin is active HIGH.
+
+With Wi-Fi settings left empty, upload is disabled but detection, GPS and serial diagnostics continue.
+
+## Build
+
+```sh
+pio run
+```
+
+Serial monitor baud rate: 115200.
