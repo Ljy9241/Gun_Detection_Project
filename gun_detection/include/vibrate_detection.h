@@ -15,9 +15,10 @@ struct VibrateEvent {
 
 class VibrateDetection {
 public:
-    // 配置三轴 ADC 输入和传感器休眠控制脚。
+    // 配置三轴输入脚和传感器休眠控制脚；ADC 样本由 AdcSampler 提供。
     void begin(uint8_t xPin, uint8_t yPin, uint8_t zPin, uint8_t sleepPin);
     void update(uint64_t nowUs);
+    void processSample(uint16_t rawX, uint16_t rawY, uint16_t rawZ, uint64_t timestampUs);
     bool consumeEvent(VibrateEvent& event);  // 取走单个待处理事件。
 
     bool flag() const { return eventPending_; }

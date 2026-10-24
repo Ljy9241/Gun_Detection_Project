@@ -15,10 +15,9 @@ void VibrateDetection::begin(uint8_t xPin, uint8_t yPin, uint8_t zPin, uint8_t s
     pinMode(xPin_, INPUT);
     pinMode(yPin_, INPUT);
     pinMode(zPin_, INPUT);
-    analogSetPinAttenuation(xPin_, ADC_11db);
+    analogSetPinAttenuation(xPin_, ADC_11db);  // Also configures the one-shot fallback path.
     analogSetPinAttenuation(yPin_, ADC_11db);
     analogSetPinAttenuation(zPin_, ADC_11db);
-
     sampleIntervalUs_ = 1000000UL / config::VIBRATE_SAMPLE_RATE_HZ;
     nextSampleUs_ = micros() + 1000;  // MMA7361 enable response is sub-millisecond.
 }
@@ -35,9 +34,14 @@ void VibrateDetection::update(uint64_t nowUs) {
     }
     nextSampleUs_ += sampleIntervalUs_;
 
-    rawX_ = analogRead(xPin_);
-    rawY_ = analogRead(yPin_);
-    rawZ_ = analogRead(zPin_);
+    processSample(analogRead(xPin_), analogRead(yPin_), analogRead(zPin_), nowUs);
+}
+
+void VibrateDetection::processSample(uint16_t rawX, uint16_t rawY, uint16_t rawZ,
+                                     uint64_t nowUs) {
+    rawX_ = rawX;
+    rawY_ = rawY;
+    rawZ_ = rawZ;
 
     // 独立累计倾角校准样本，不延迟振动检测的 300 点启动校准。
     if (!angleCalibrationComplete_) {

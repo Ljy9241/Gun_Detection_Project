@@ -7,7 +7,7 @@
 void VoiceDetection::begin(uint8_t adcPin) {
     adcPin_ = adcPin;
     pinMode(adcPin_, INPUT);
-    analogSetPinAttenuation(adcPin_, ADC_11db);
+    analogSetPinAttenuation(adcPin_, ADC_11db);  // Also configures the one-shot fallback path.
     sampleIntervalUs_ = 1000000UL / config::VOICE_SAMPLE_RATE_HZ;
     nextSampleUs_ = micros();
     resetFrame();
@@ -34,8 +34,10 @@ void VoiceDetection::update(uint64_t nowUs) {
     }
     nextSampleUs_ += sampleIntervalUs_;
 
-    // 每次调用至多进行一次 ADC 采样，保证实际采样间隔可控。
-    const uint16_t raw = analogRead(adcPin_);
+    processSample(analogRead(adcPin_), nowUs);
+}
+
+void VoiceDetection::processSample(uint16_t raw, uint64_t nowUs) {
     latestRaw_ = raw;
     minValue_ = min(minValue_, raw);
     maxValue_ = max(maxValue_, raw);

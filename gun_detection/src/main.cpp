@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <esp_timer.h>
 
+#include "adc_sampler.h"
 #include "gps_manager.h"
 #include "shot_detector.h"
 #include "system_config.h"
@@ -14,6 +15,13 @@ VibrateDetection vibrateDetection;
 GpsManager gps(Serial1);
 ShotDetector shotDetector;
 WifiTransport wifiTransport;
+AdcSampler adcSampler;
+AdcSample adcSamples[1024];
+uint16_t pendingMicSample = 0;
+uint16_t pendingAccelX = 0;
+uint16_t pendingAccelY = 0;
+uint16_t pendingAccelZ = 0;
+uint8_t pendingAdcMask = 0;
 
 uint32_t lastDiagnosticMs = 0;
 uint32_t voiceDetectionCount = 0;
@@ -44,10 +52,10 @@ void setup() {
     Serial.println();
     Serial.println("Gun detection firmware starting...");
 
-    analogReadResolution(12);
     voiceDetection.begin(config::MIC_ADC_PIN);
     vibrateDetection.begin(config::MMA_X_PIN, config::MMA_Y_PIN, config::MMA_Z_PIN,
                             config::MMA_SLEEP_PIN);
+    adcSampler.begin();
     gps.begin(config::GPS_ENABLE_PIN, config::GPS_PPS_PIN, config::GPS_UART_RX_PIN,
               config::GPS_UART_TX_PIN, config::GPS_BAUD);
     wifiTransport.begin();
@@ -60,8 +68,43 @@ void loop() {
     const uint64_t nowUs = esp_timer_get_time();
     const uint32_t nowMs = millis();
 
-    voiceDetection.update(nowUs);
-    vibrateDetection.update(nowUs);
+    if (adcSampler.ready()) {
+        const size_t sampleCount = adcSampler.read(adcSamples, 1024, nowUs);
+        for (size_t i = 0; i < sampleCount; ++i) {
+            const AdcSample& sample = adcSamples[i];
+            switch (sample.input) {
+                case AdcInput::Microphone:
+                    // A new scan begins at the microphone; discard any incomplete
+                    // previous scan rather than mixing axes from different instants.
+                    pendingAdcMask = 0;
+                    pendingMicSample = sample.value;
+                    pendingAdcMask |= 0x01;
+                    break;
+                case AdcInput::AccelX:
+                    pendingAccelX = sample.value;
+                    pendingAdcMask |= 0x02;
+                    break;
+                case AdcInput::AccelY:
+                    pendingAccelY = sample.value;
+                    pendingAdcMask |= 0x04;
+                    break;
+                case AdcInput::AccelZ:
+                    pendingAccelZ = sample.value;
+                    pendingAdcMask |= 0x08;
+                    break;
+            }
+            if (pendingAdcMask == 0x0F) {
+                voiceDetection.processSample(pendingMicSample, sample.timestampUs);
+                vibrateDetection.processSample(pendingAccelX, pendingAccelY,
+                                               pendingAccelZ, sample.timestampUs);
+                pendingAdcMask = 0;
+            }
+        }
+    } else {
+        // DMA setup failsafe: retain the previous timed one-shot sampling path.
+        voiceDetection.update(nowUs);
+        vibrateDetection.update(nowUs);
+    }
 
     if (!config::CAPACITY_TEST_MODE && vibrateDetection.calibrated()) {
         const bool stationary = vibrateDetection.magnitude() <
@@ -182,7 +225,8 @@ void loop() {
         Serial.printf(
             "mic[raw=%u p2p=%u rms=%.1f] mma[%s x=%u y=%u z=%u mag=%.1f jerk=%.1f] "
             "flags[%d,%d] power[%s] gps[%s sats=%lu chars=%lu] wifi[%s] "
-            "spool[written=%lu rate=%lu/s] udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] "
+            "adc[overrun=%lu] spool[written=%lu rate=%lu/s] "
+            "udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] "
             "dropped[%lu,%lu]\n",
             voiceDetection.latestRaw(), voiceDetection.latestPeakToPeak(),
             voiceDetection.latestRms(), vibrateDetection.calibrated() ? "ready" : "cal",
@@ -193,6 +237,7 @@ void loop() {
             static_cast<unsigned long>(gps.parsedCharacters()),
             wifiTransport.connected() ? "connected" :
                 (wifiTransport.radioEnabled() ? "search" : "off"),
+            static_cast<unsigned long>(adcSampler.overrunCount()),
             static_cast<unsigned long>(wifiTransport.telemetryWritesTotal()),
             static_cast<unsigned long>(wifiTransport.telemetryWritesPerSecond()),
             wifiTransport.queuedEvents(),

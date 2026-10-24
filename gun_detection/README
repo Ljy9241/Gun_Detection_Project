@@ -14,8 +14,9 @@
 
 ## 功能模块
 
-- `voice_detection`：以 1 kHz 连续采样，每 10 ms 计算峰峰值、均方根和能量突增并进行声音检测。
-- `vibrate_detection`：以 1 kHz 采集三轴数据，进行基线、幅值和变化量检测。
+- `adc_sampler`：用 ESP32-S3 ADC1 数字控制器 DMA 扫描麦克风和三轴输入，总转换率 4 kHz，即每路 1 kHz；主循环延迟期间由 DMA 缓冲样本。
+- `voice_detection`：消费 1 kHz 麦克风样本，每 10 ms 计算峰峰值、均方根和能量突增并进行声音检测。
+- `vibrate_detection`：消费 1 kHz 三轴样本，进行基线、幅值、变化量和角度校准。
 - `shot_detector`：按时间窗口融合声音与振动事件，并抑制重复射击事件。
 - `gps_manager`：通过 UART1 持续解析 NMEA 数据。
 - `wifi_transport`：非阻塞管理 Wi-Fi 连接，并通过 UDP/JSON 发送状态和事件。

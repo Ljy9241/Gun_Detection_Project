@@ -12,9 +12,10 @@ struct VoiceEvent {
 
 class VoiceDetection {
 public:
-    // 初始化麦克风 ADC 与固定采样节拍。
+    // 配置麦克风输入脚与检测帧参数；ADC 样本由 AdcSampler 提供。
     void begin(uint8_t adcPin);
     void update(uint64_t nowUs);
+    void processSample(uint16_t raw, uint64_t timestampUs);
     bool consumeEvent(VoiceEvent& event);
 
     bool flag() const { return eventPending_; }
