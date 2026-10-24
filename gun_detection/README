@@ -63,11 +63,11 @@ GPS 和 NTP 校准后，RTC 可在设备持续供电时继续推进时间；ESP3
 
 ### 一次性 Flash 容量测试
 
-`platformio.ini` 中的 `esp32-s3-capacity-test` 是独立测试构建目标。使用 `pio run -e esp32-s3-capacity-test` 编译，使用 `pio run -e esp32-s3-capacity-test -t upload` 烧录。该构建首次启动时会清除设备 LittleFS 中旧的遥测分段，但保留单调递增的传输序号；测试构建后续重启不会再次清除数据。
+`platformio.ini` 中的 `esp32-s3-capacity-test` 是独立测试构建目标。使用 `pio run -e esp32-s3-capacity-test` 编译，使用 `pio run -e esp32-s3-capacity-test -t upload` 烧录。每次重新编译都会生成新的测试构建标识；设备首次启动发现标识变化时，会清除旧的 LittleFS 遥测分段和上次测试结果，并保留单调递增的传输序号。同一构建断电重启不会再次清除数据。
 
-测试构建会暂停遥测上传并继续采集，直到 LittleFS 无法再写入记录。达到上限时，它会停止新增遥测，统计并持久化存满时的未上传记录数和 LittleFS 已用/总字节数；串口会打印 `CAPACITY_TEST_FULL`，重启后会打印已保存的 `CAPACITY_TEST_RESULT`。之后设备联网并连接上位机时，遥测批次会开始上传，监视程序的“Flash 容量测试”框会显示存满标志、条数和字节数。因测试快照已锁定，ACK 回收空间后不会再写入新遥测。
+测试构建会暂停遥测上传并继续采集，直到 LittleFS 无法再写入记录。达到上限时，它会停止新增遥测，统计并持久化存满时的未上传记录数和 LittleFS 已用/总字节数；串口会打印 `CAPACITY_TEST_FULL`，重启后会打印已保存的 `CAPACITY_TEST_RESULT`。之后设备联网并连接上位机时，遥测批次会开始上传，监视程序的“Flash 存储”框会显示存满标志、条数和字节数。因测试快照已锁定，ACK 回收空间后不会再写入新遥测。
 
-测量结果保存在 NVS 中。读取结果前请保留测试构建，不要清空设备 NVS 或格式化 LittleFS；测完后再烧录正常目标 `esp32-s3-devkitm-1`。此测试目标是一次性容量测量用途，不应用于日常运行。
+测量结果保存在 NVS 中。读取结果前请保留当前测试构建，不要重新编译容量测试环境、清空设备 NVS 或格式化 LittleFS，否则会启动新测试并清除当前结果；测完后再烧录正常目标 `esp32-s3-devkitm-1`。此测试目标是一次性容量测量用途，不应用于日常运行。
 
 ## 静态倾斜角
 

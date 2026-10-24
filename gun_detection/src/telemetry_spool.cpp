@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef GUN_CAPACITY_TEST_BUILD_ID
+#define GUN_CAPACITY_TEST_BUILD_ID 0ULL
+#endif
+
 namespace {
 Preferences preferences;
 }
@@ -53,9 +57,14 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
     nextSequence_ = max(nextSequence_, previousReservedEnd);
     reservedSequenceEnd_ = previousReservedEnd;
 
-    if (capacityTestMode_ && !preferences.getBool("ctinit", false)) {
-        // This dedicated test build clears queued records once, while preserving
-        // monotonic sequence numbers so PC-side receipts can never collide.
+    const uint64_t previousCapacityTestBuild = preferences.getULong64("ctbuild", 0);
+    const uint64_t currentCapacityTestBuild = static_cast<uint64_t>(GUN_CAPACITY_TEST_BUILD_ID);
+    const bool newCapacityTestBuild = currentCapacityTestBuild != 0 &&
+                                      previousCapacityTestBuild != currentCapacityTestBuild;
+    if (capacityTestMode_ &&
+        (!preferences.getBool("ctinit", false) || newCapacityTestBuild)) {
+        // A newly compiled test image starts a fresh run. Rebooting that same image
+        // preserves progress and monotonic sequence numbers.
         for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
             char path[20];
             segmentPath(index, path, sizeof(path));
@@ -71,7 +80,8 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
             preferences.putULong64("ctcount", 0) != sizeof(uint64_t) ||
             preferences.putUInt("ctused", 0) == 0 ||
             preferences.putUInt("cttotal", LittleFS.totalBytes()) == 0 ||
-            preferences.putBool("ctinit", true) == 0) {
+            preferences.putBool("ctinit", true) == 0 ||
+            preferences.putULong64("ctbuild", currentCapacityTestBuild) != sizeof(uint64_t)) {
             Serial.println("Capacity test: failed to initialize test metadata.");
             return false;
         }
@@ -130,6 +140,7 @@ bool TelemetrySpool::scan() {
     memset(segmentOffsets_, 0, sizeof(segmentOffsets_));
     memset(segmentHasPending_, 0, sizeof(segmentHasPending_));
     memset(segmentAppendable_, 0, sizeof(segmentAppendable_));
+    pendingRecordCount_ = 0;
     uint64_t maximumSequence = acknowledgedSequence_;
     latestSegment_ = 0;
     bool anySegment = false;
@@ -145,10 +156,13 @@ bool TelemetrySpool::scan() {
         while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
             if (!valid(record)) break;  // Ignore a torn/corrupt tail; never overwrite it.
             maximumSequence = max(maximumSequence, record.sequence);
-            if (!segmentHasPending_[index] && record.sequence > acknowledgedSequence_) {
-                segmentHeads_[index] = record;
-                segmentOffsets_[index] = offset;
-                segmentHasPending_[index] = true;
+            if (record.sequence > acknowledgedSequence_) {
+                ++pendingRecordCount_;
+                if (!segmentHasPending_[index]) {
+                    segmentHeads_[index] = record;
+                    segmentOffsets_[index] = offset;
+                    segmentHasPending_[index] = true;
+                }
             }
             offset += sizeof(record);
         }
@@ -235,6 +249,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
     }
     segmentAppendable_[targetSegment] = true;
     ++nextSequence_;
+    ++pendingRecordCount_;
     if (capacityTestMode_) ++capacityTestCurrentRecordCount_;
     return true;
 }
@@ -318,22 +333,7 @@ size_t TelemetrySpool::peekBatch(TelemetryRecord* records, size_t capacity) {
 }
 
 uint64_t TelemetrySpool::pendingCount() const {
-    if (!mounted_) return 0;
-
-    uint64_t count = 0;
-    for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
-        char path[20];
-        segmentPath(index, path, sizeof(path));
-        File file = LittleFS.open(path, FILE_READ);
-        if (!file) continue;
-        TelemetryRecord record;
-        while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
-            if (!valid(record)) break;
-            if (record.sequence > acknowledgedSequence_) ++count;
-        }
-        file.close();
-    }
-    return count;
+    return mounted_ ? pendingRecordCount_ : 0;
 }
 
 void TelemetrySpool::latchCapacityTestFull() {
@@ -383,6 +383,7 @@ bool TelemetrySpool::acknowledge(uint64_t sequence) {
             if (!capacityTestFull_) full_ = false;
         }
     }
+    if (pendingRecordCount_ > 0) --pendingRecordCount_;
     return true;
 }
 

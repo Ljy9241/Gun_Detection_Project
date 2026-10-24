@@ -263,7 +263,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"satellites\":%lu,\"ageMs\":%lu,\"chars\":%lu,"
         "\"failedChecksums\":%lu},"
         "\"storageTest\":{\"enabled\":%s,\"full\":%s,\"records\":%llu,"
-        "\"currentRecords\":%llu,"
+        "\"currentRecords\":%llu,\"pendingRecords\":%llu,"
         "\"usedBytes\":%lu,\"totalBytes\":%lu},"
         "\"sampleDrops\":{\"voice\":%lu,\"vibration\":%lu}}\r\n",
         config::DEVICE_ID, timestamp, timestampValid ? "true" : "false",
@@ -294,6 +294,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         spool_.capacityTestFull() ? "true" : "false",
         static_cast<unsigned long long>(spool_.capacityTestRecordCount()),
         static_cast<unsigned long long>(spool_.capacityTestCurrentRecordCount()),
+        static_cast<unsigned long long>(spool_.pendingCount()),
         static_cast<unsigned long>(spool_.capacityTestUsedBytes()),
         static_cast<unsigned long>(spool_.capacityTestTotalBytes()),
         static_cast<unsigned long>(telemetry_.voiceDroppedSamples),

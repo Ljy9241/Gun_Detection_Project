@@ -60,6 +60,7 @@ private:
     uint64_t persistedAcknowledgedSequence_ = 0;
     uint64_t capacityTestRecordCount_ = 0;
     uint64_t capacityTestCurrentRecordCount_ = 0;
+    uint64_t pendingRecordCount_ = 0;
     uint32_t capacityTestUsedBytes_ = 0;
     uint32_t capacityTestTotalBytes_ = 0;
     TelemetryRecord segmentHeads_[SEGMENT_LIMIT] = {};
