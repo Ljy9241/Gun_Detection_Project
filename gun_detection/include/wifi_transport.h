@@ -5,6 +5,7 @@
 #include <WiFiUdp.h>
 
 #include "shot_detector.h"
+#include "telemetry_spool.h"
 
 // 定时状态包所需的传感器快照和运行统计。
 struct WifiTelemetry {
@@ -59,6 +60,7 @@ public:
 
 private:
     static constexpr uint8_t QUEUE_SIZE = 16;
+    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 4;
     enum class EventType : uint8_t { Shot, Voice, Vibration };
     struct QueuedEvent {
         EventType type = EventType::Shot;
@@ -72,14 +74,21 @@ private:
     bool send(const QueuedEvent& event);
     // 上报周期状态包及最近一个统计窗口的传感器峰值。
     bool sendStatus(uint32_t nowMs);
+    bool sendTelemetryBatch(const TelemetryRecord* records, size_t count);
+    void receiveAcknowledgements();
 
     WiFiUDP udp_;
+    TelemetrySpool spool_;
     QueuedEvent queue_[QUEUE_SIZE];
     uint8_t head_ = 0;  // 下一个写入位置。
     uint8_t tail_ = 0;
     uint8_t count_ = 0;
     uint32_t lastConnectAttemptMs_ = 0;
     uint32_t lastStatusMs_ = 0;
+    uint32_t lastSpoolMs_ = 0;
+    uint32_t lastRecordSendMs_ = 0;
+    uint64_t inFlightSequences_[TELEMETRY_BATCH_SIZE] = {};
+    uint8_t inFlightCount_ = 0;
     uint32_t lastSendErrorLogMs_ = 0;
     uint32_t sentEvents_ = 0;
     uint32_t sentStatuses_ = 0;
@@ -93,4 +102,6 @@ private:
     float windowVibrationJerk_ = 0.0F;
     bool enabled_ = false;
     bool wasConnected_ = false;
+    bool recordInFlight_ = false;
+    bool ackListenerStarted_ = false;
 };

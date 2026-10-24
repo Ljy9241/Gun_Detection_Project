@@ -1,60 +1,74 @@
-# ESP32-S3 gun detection firmware
+# ESP32-S3 检测固件
 
-First functional version: all sensing circuits, the ESP32-S3, GPS and Wi-Fi remain active.
-No light/deep-sleep logic is enabled yet.
+当前功能版本保持传感器电路、ESP32-S3、GPS 和 Wi-Fi 持续工作，尚未启用轻睡眠或深睡眠。
 
-## Pin assignment
+## 引脚分配
 
-| Function | GPIO |
+| 功能 | GPIO |
 |---|---:|
-| Microphone ADC | 8 |
+| 麦克风 ADC | 8 |
 | MMA7361 X/Y/Z | 4 / 5 / 6 |
-| MMA7361 SLEEP | 7 (HIGH = active) |
+| MMA7361 SLEEP | 7（高电平工作）|
 | GPS EN / PPS | 9 / 10 |
 | ESP32 UART TX / RX | 17 / 18 |
 
-## Modules
+## 功能模块
 
-- `voice_detection`: continuous 1 kHz sampling, 10 ms frame P2P/RMS/energy-rise detection.
-- `vibrate_detection`: 1 kHz three-axis sampling, baseline, magnitude and jerk detection.
-- `shot_detector`: time-window fusion and duplicate-shot suppression.
-- `gps_manager`: continuous NMEA parsing through UART1.
-- `wifi_transport`: non-blocking connection management and UDP/JSON event queue.
+- `voice_detection`：以 1 kHz 连续采样，每 10 ms 计算峰峰值、均方根和能量突增并进行声音检测。
+- `vibrate_detection`：以 1 kHz 采集三轴数据，进行基线、幅值和变化量检测。
+- `shot_detector`：按时间窗口融合声音与振动事件，并抑制重复射击事件。
+- `gps_manager`：通过 UART1 持续解析 NMEA 数据。
+- `wifi_transport`：非阻塞管理 Wi-Fi 连接，并通过 UDP/JSON 发送状态和事件。
+- `telemetry_spool`：使用 LittleFS 分段保存 20 Hz 遥测记录，支持断电后恢复。
 
-## Configuration
+## 配置
 
-Edit `include/system_config.h` before hardware/network testing:
+硬件或网络联调前，请编辑 `include/system_config.h`：
 
-- Calibrate the voice and vibration thresholds from serial output.
-- Set `WIFI_SSID`, `WIFI_PASSWORD`, `UPPER_COMPUTER_HOST` and port.
-- Verify the GPS baud rate and that its EN pin is active HIGH.
+- 根据串口输出校准声音和振动检测阈值。
+- 设置 `WIFI_SSID`、`WIFI_PASSWORD`、`UPPER_COMPUTER_HOST` 和上位机端口。
+- 如需更换 NTP 服务，设置 `NTP_SERVER`。
+- 确认 GPS 波特率，以及 EN 引脚是否为高电平使能。
 
-With Wi-Fi settings left empty, upload is disabled but detection, GPS and serial diagnostics continue.
+Wi-Fi 配置为空时，固件仍运行检测、GPS 解析和串口诊断，但不会上传数据。
 
-The firmware synchronizes the ESP32 system RTC from valid GPS UTC date/time. UDP status and
-shot packets include `timestamp` in `YYYY-MM-DD HH:MM:SS` format and `timestampValid`.
-The RTC continues running while Wi-Fi is disconnected. After a full power loss, a valid GPS
-time is required to initialize the calendar clock again; this board configuration has no
-separate battery-backed RTC module. When no valid RTC time is available, the timestamp is empty
-and `timestampValid` is false. The monitor uses the device timestamp for its display and CSV
-when available, and falls back to the computer receive time otherwise.
+## 时间戳
 
-Each voice or vibration trigger is also queued and uploaded as its own `detection` UDP event
-(`detectionType` is `voice` or `vibration`). Status packets include cumulative
-`voiceDetectionCount` and `vibrationDetectionCount` values since boot; the monitor displays both
-counts and the latest event details separately. Fused detections continue to upload as `shot`
-events.
+目标时间来源优先级如下：
 
-Static roll/pitch estimates use the MMA7361 axes after a separate 2-second startup calibration.
-Keep the sensor level and motionless during this calibration. The original 300-sample vibration
-calibration and vibration detection continue independently. The status packet reports
-`tilt.rollDeg` and `tilt.pitchDeg`; these accelerometer-only angles are intended for static or
-slow tilt and are affected by firing and other linear acceleration.
+1. GPS 日期和时间有效时，使用 GPS 时间作为校时来源。
+2. GPS 时间无效且 Wi-Fi 可用时，使用 NTP 网络时间作为校时来源。
+3. GPS 和 Wi-Fi 时间源不可用时，若 RTC 已有有效日历时间，则使用 RTC 继续推算当前时间。
+4. 如果上电后尚未获得过有效的 GPS 或 NTP 日历时间，则使用设备上电后的累计运行时间。
 
-## Build
+GPS 和 NTP 校准后，RTC 可在设备持续供电时继续推进时间；ESP32-S3 内部 RTC 计时器在上电复位时会复位，不能单独提供断电后的日历时间。若设备断电重启且 GPS、NTP 都不可用，只能使用本次上电后的累计运行时间，不能据此恢复断电期间的真实年月日。
+
+参考：[乐鑫 ESP-IDF 系统时间说明](https://docs.espressif.com/projects/esp-idf/en/v6.0.2/esp32s3/api-reference/system/system_time.html)。
+
+固件由 `gps_manager` 使用有效 GPS 日期和时间调用 `settimeofday()` 校准系统时钟；Wi-Fi 连接后也会启动 UTC NTP 校时。系统时钟按 UTC 计时，生成时间戳时统一转换为北京时间（UTC+8），因此遥测、状态和检测事件中的有效日历时间均为北京时间，格式为 `YYYY-MM-DD HH:MM:SS`。GPS 或 NTP 校时成功后，系统 RTC 继续推进时间。本次上电后尚未获得 GPS/NTP 校时，或重启后 RTC 没有有效日历基准时，`timestamp` 使用 `T+HH:MM:SS` 表示本次上电后的累计运行时间，例如 `T+00:03:12`。这里的小时数可以超过两位。该相对时间会写入遥测记录和上位机数据库，不会留空或伪装成日历时间。校时成功后，后续时间戳切换为北京时间；此前保存的 `T+...` 记录保持原值。
+
+## 检测事件
+
+每次声音或振动触发都会独立排队，并作为 `detection` UDP 事件上传；`detectionType` 分别为 `voice` 和 `vibration`。状态包包含自启动以来累计的 `voiceDetectionCount` 和 `vibrationDetectionCount`，上位机分别显示两种检测次数和最近事件详情。声音与振动融合后仍作为 `shot` 事件上传。
+
+## 遥测数据持久化
+
+固件每 50 ms 保存一条遥测记录，即每秒 20 条。记录字段为 RTC 时间戳、三轴原始加速度、麦克风原始值/峰峰值/均方根值，以及 GPS 纬度和经度。GPS 无有效定位时，经纬度以无效值保存并在上传时写成 `NULL`。
+
+设备使用 LittleFS 分段保存带校验的定长记录。每条记录带传输用序号；断电重启后固件扫描记录并继续上传。LittleFS 挂载失败时不会反复自动格式化，以免擦除待上传数据。首次初始化文件系统时会执行格式化。
+
+上位机开始监听后，会在 `data_monitor/gun_telemetry.db` 创建 SQLite 数据库。`telemetry` 表只包含所需的九个测量字段；独立的 `upload_receipts` 表保存 `device_id` 和 `sequence`，用于重传去重。设备每个 UDP 数据包最多发送 4 条遥测记录；上位机在同一个 SQLite 事务中批量写入记录和去重凭据，事务提交成功后才向设备 UDP 端口 8889 返回整批序号的 ACK。ACK 丢失时设备会重发整批；已入库记录不会重复写入。设备确认整批记录后，在一个分段中的记录全部确认时回收该分段。
+
+存储空间不足时，设备保留未确认记录并暂停新增记录；有已确认分段被回收后恢复写入。以每秒 20 条记录估算，`huge_app.csv` 分区布局可暂存约 10–15 分钟未上传数据，实际时长受 LittleFS 文件系统开销影响。时间戳只有秒级精度，同一秒内的记录由序号区分。
+
+## 静态倾斜角
+
+横滚角和俯仰角使用 MMA7361 三轴数据计算，启动时进行独立的 2 秒静止校准。校准期间请保持传感器水平且静止。原有的 300 点振动校准和振动检测仍独立运行。状态包中的 `tilt.rollDeg` 与 `tilt.pitchDeg` 只适用于静止或缓慢倾斜；射击及其他线性加速度会影响角度结果。
+
+## 编译
 
 ```sh
 pio run
 ```
 
-Serial monitor baud rate: 115200.
+串口监视器波特率：115200。

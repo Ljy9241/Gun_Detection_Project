@@ -47,6 +47,8 @@ inline constexpr char WIFI_PASSWORD[] = "zxcvbnm1";
 // 此处填写电脑无线网卡的 IPv4 地址，不要填写手机热点网关地址。
 inline constexpr char UPPER_COMPUTER_HOST[] = "10.126.104.83";
 inline constexpr uint16_t UPPER_COMPUTER_PORT = 8888;
+inline constexpr uint16_t DEVICE_UDP_PORT = 8889;  // 接收电脑端入库确认（ACK）。
+inline constexpr char NTP_SERVER[] = "pool.ntp.org";
 inline constexpr char DEVICE_ID[] = "gun_dection";
 inline constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;      //Wi-Fi 重新连接的时间间隔
 inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 50;          // UDP 状态包发送的时间间隔

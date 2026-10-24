@@ -2,12 +2,14 @@
 
 import csv
 import json
+import sqlite3
 import socket
 import sys
 import threading
 import time
 from collections import deque
 from datetime import datetime
+from pathlib import Path
 
 import pyqtgraph as pg
 from PyQt5.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
@@ -41,6 +43,7 @@ CSV_FIELDS = [
     "pitch_deg", "gps_valid",
     "latitude", "longitude", "altitude_m", "speed_kmph", "satellites",
 ]
+DATABASE_PATH = Path(__file__).resolve().with_name("gun_telemetry.db")
 
 
 class UdpReceiver(QObject):
@@ -78,10 +81,23 @@ class UdpReceiver(QObject):
         """绑定 UDP 端口、解析 JSON 包，并报告非法数据或套接字错误。"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket = sock
+        database = None
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((host, port))
             sock.settimeout(0.5)
+            database = sqlite3.connect(DATABASE_PATH, timeout=10)
+            database.execute("PRAGMA journal_mode=WAL")
+            database.execute("PRAGMA synchronous=FULL")
+            database.executescript(
+                "CREATE TABLE IF NOT EXISTS telemetry ("
+                "timestamp TEXT, accel_x INTEGER, accel_y INTEGER, accel_z INTEGER, "
+                "mic_raw INTEGER, mic_p2p INTEGER, mic_rms REAL, latitude REAL, longitude REAL);"
+                "CREATE TABLE IF NOT EXISTS upload_receipts ("
+                "device_id TEXT NOT NULL, sequence INTEGER NOT NULL, "
+                "PRIMARY KEY (device_id, sequence));"
+            )
+            database.commit()
             self.listening.emit(True, f"监听中：{host}:{port}")
             while not self._stop.is_set():
                 try:
@@ -96,20 +112,110 @@ class UdpReceiver(QObject):
                     packet = json.loads(data.decode("utf-8-sig").strip())
                     if isinstance(packet, dict):
                         packet["_sender"] = f"{address[0]}:{address[1]}"
-                        self.packet_received.emit(packet)
+                        if packet.get("type") == "telemetry":
+                            try:
+                                self._store_telemetry_and_ack(database, sock, packet, address)
+                            except (sqlite3.DatabaseError, KeyError, TypeError, ValueError) as exc:
+                                self.receiver_error.emit(f"遥测入库失败，未确认设备记录：{exc}")
+                        elif packet.get("type") == "telemetry_batch":
+                            try:
+                                self._store_telemetry_batch_and_ack(database, sock, packet, address)
+                            except (sqlite3.DatabaseError, KeyError, TypeError, ValueError) as exc:
+                                self.receiver_error.emit(f"遥测批次入库失败，未确认设备记录：{exc}")
+                        # 批量遥测只用于数据库入库；状态包继续驱动实时界面，避免批次包覆盖状态摘要。
+                        if packet.get("type") != "telemetry_batch":
+                            self.packet_received.emit(packet)
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                     self.receiver_error.emit(f"收到非 JSON 数据：{exc}")
+                except OSError as exc:
+                    self.receiver_error.emit(f"遥测 ACK 发送失败，设备会重传：{exc}")
             self.listening.emit(False, "已停止监听")
-        except OSError as exc:
+        except (OSError, sqlite3.DatabaseError) as exc:
             self.listening.emit(False, "监听失败")
             self.receiver_error.emit(f"无法监听 {host}:{port}：{exc}")
         finally:
+            if database is not None:
+                database.close()
             try:
                 sock.close()
             except OSError:
                 pass
             if self._socket is sock:
                 self._socket = None
+
+    @staticmethod
+    def _store_telemetry_and_ack(database, sock, packet, address):
+        """提交记录及去重凭据后再 ACK，避免设备过早删除未落盘数据。"""
+        device_id = str(packet["deviceId"])
+        sequence = int(packet["sequence"])
+        timestamp = packet.get("timestamp") if packet.get("timestampValid") else None
+        with database:
+            cursor = database.execute(
+                "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
+                (device_id, sequence),
+            )
+            if cursor.rowcount:
+                database.execute(
+                    "INSERT INTO telemetry(timestamp, accel_x, accel_y, accel_z, "
+                    "mic_raw, mic_p2p, mic_rms, latitude, longitude) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        timestamp, packet.get("accel_x"), packet.get("accel_y"),
+                        packet.get("accel_z"), packet.get("mic_raw"), packet.get("mic_p2p"),
+                        packet.get("mic_rms"), packet.get("latitude"), packet.get("longitude"),
+                    ),
+                )
+        acknowledgement = json.dumps(
+            {"type": "ack", "deviceId": device_id, "sequence": sequence},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        sock.sendto(acknowledgement, address)
+
+    @staticmethod
+    def _store_telemetry_batch_and_ack(database, sock, packet, address):
+        """一个事务写入整批记录；事务提交成功后才一次确认整批序号。"""
+        device_id = str(packet["deviceId"])
+        records = packet["records"]
+        if not isinstance(records, list) or not records or len(records) > 64:
+            raise ValueError("批次记录数无效")
+
+        sequences = []
+        new_rows = []
+        seen_sequences = set()
+        with database:
+            for record in records:
+                if not isinstance(record, dict):
+                    raise TypeError("批次记录格式无效")
+                sequence = int(record["sequence"])
+                if sequence in seen_sequences:
+                    raise ValueError("批次中存在重复序号")
+                seen_sequences.add(sequence)
+                sequences.append(sequence)
+                cursor = database.execute(
+                    "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
+                    (device_id, sequence),
+                )
+                if cursor.rowcount:
+                    timestamp = record.get("timestamp") if record.get("timestampValid") else None
+                    new_rows.append((
+                        timestamp, record.get("accel_x"), record.get("accel_y"),
+                        record.get("accel_z"), record.get("mic_raw"), record.get("mic_p2p"),
+                        record.get("mic_rms"), record.get("latitude"), record.get("longitude"),
+                    ))
+
+            if new_rows:
+                database.executemany(
+                    "INSERT INTO telemetry(timestamp, accel_x, accel_y, accel_z, "
+                    "mic_raw, mic_p2p, mic_rms, latitude, longitude) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    new_rows,
+                )
+
+        acknowledgement = json.dumps(
+            {"type": "ack_batch", "deviceId": device_id, "sequences": sequences},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        sock.sendto(acknowledgement, address)
 
 
 class MonitorWindow(QMainWindow):

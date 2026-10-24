@@ -1,22 +1,38 @@
 #include "wifi_transport.h"
 
+#include <esp_timer.h>
 #include <time.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "system_config.h"
 
-static bool formatRtcTimestamp(char* buffer, size_t size) {
+static bool formatTimestamp(char* buffer, size_t size) {
     const time_t now = time(nullptr);
-    if (now < 1704067200) {  // 2024-01-01；ESP32 时钟未校准时通常仍在 1970 年。
-        buffer[0] = '\0';
-        return false;
+    if (now >= 1704067200) {  // 2024-01-01；早于此值表示尚无有效日历基准。
+        // 系统时钟统一保存 UTC 时间；仅在生成显示/存储字符串时换算为北京时间。
+        const time_t beijingTime = now + 8 * 60 * 60;
+        tm beijing = {};
+        if (gmtime_r(&beijingTime, &beijing) &&
+            strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &beijing) > 0) {
+            return true;
+        }
     }
-    tm utc = {};
-    gmtime_r(&now, &utc);
-    strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &utc);
+
+    // GPS/NTP 尚未校时：用单调计时器记录本次上电后的经过时间，不伪造日历时间。
+    const uint64_t elapsedSeconds = static_cast<uint64_t>(esp_timer_get_time()) / 1000000ULL;
+    const uint64_t hours = elapsedSeconds / 3600ULL;
+    const uint64_t minutes = (elapsedSeconds / 60ULL) % 60ULL;
+    const uint64_t seconds = elapsedSeconds % 60ULL;
+    snprintf(buffer, size, "T+%02llu:%02llu:%02llu",
+             static_cast<unsigned long long>(hours),
+             static_cast<unsigned long long>(minutes),
+             static_cast<unsigned long long>(seconds));
     return true;
 }
 
 void WifiTransport::begin() {
+    spool_.begin();
     enabled_ = config::WIFI_SSID[0] != '\0' && config::UPPER_COMPUTER_HOST[0] != '\0';
     if (!enabled_) {
         Serial.println("Wi-Fi upload disabled: configure WIFI_SSID and UPPER_COMPUTER_HOST.");
@@ -40,6 +56,21 @@ void WifiTransport::setTelemetry(const WifiTelemetry& telemetry) {
 }
 
 void WifiTransport::update(uint32_t nowMs) {
+    if (nowMs - lastSpoolMs_ >= config::UDP_STATUS_INTERVAL_MS) {
+        lastSpoolMs_ = nowMs;
+        TelemetryRecord record;
+        formatTimestamp(record.timestamp, sizeof(record.timestamp));
+        record.accelX = telemetry_.vibrationX;
+        record.accelY = telemetry_.vibrationY;
+        record.accelZ = telemetry_.vibrationZ;
+        record.micRaw = telemetry_.micRaw;
+        record.micP2p = telemetry_.micPeakToPeak;
+        record.micRms = telemetry_.micRms;
+        record.latitude = telemetry_.latitude;
+        record.longitude = telemetry_.longitude;
+        record.gpsValid = telemetry_.gpsValid ? 1 : 0;
+        spool_.append(record);
+    }
     if (!enabled_) {
         return;
     }
@@ -48,10 +79,19 @@ void WifiTransport::update(uint32_t nowMs) {
     if (isConnected != wasConnected_) {
         wasConnected_ = isConnected;
         if (isConnected) {
+            // NTP 使用 UTC 校准系统时钟；时间戳格式化时再转换为北京时间。
+            configTime(0, 0, config::NTP_SERVER);
+            Serial.printf("NTP time synchronization started: %s\n", config::NTP_SERVER);
+            ackListenerStarted_ = udp_.begin(config::DEVICE_UDP_PORT);
+            if (!ackListenerStarted_) {
+                Serial.printf("UDP ACK listener failed on port %u.\n", config::DEVICE_UDP_PORT);
+            }
             Serial.printf("Wi-Fi connected: local=%s, UDP target=%s:%u\n",
                           WiFi.localIP().toString().c_str(), config::UPPER_COMPUTER_HOST,
                           config::UPPER_COMPUTER_PORT);
         } else {
+            udp_.stop();
+            ackListenerStarted_ = false;
             Serial.println("Wi-Fi disconnected; UDP upload paused.");
         }
     }
@@ -64,6 +104,23 @@ void WifiTransport::update(uint32_t nowMs) {
             WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
         }
         return;
+    }
+
+    if (!ackListenerStarted_) {
+        ackListenerStarted_ = udp_.begin(config::DEVICE_UDP_PORT);
+        if (!ackListenerStarted_) return;
+    }
+
+    receiveAcknowledgements();
+    if (!recordInFlight_ || nowMs - lastRecordSendMs_ >= 500) {
+        TelemetryRecord records[TELEMETRY_BATCH_SIZE];
+        const size_t count = spool_.peekBatch(records, TELEMETRY_BATCH_SIZE);
+        if (count > 0 && sendTelemetryBatch(records, count)) {
+            inFlightCount_ = static_cast<uint8_t>(count);
+            for (size_t i = 0; i < count; ++i) inFlightSequences_[i] = records[i].sequence;
+            recordInFlight_ = true;
+            lastRecordSendMs_ = nowMs;
+        }
     }
 
     if (count_ > 0 && send(queue_[tail_])) {
@@ -82,11 +139,94 @@ void WifiTransport::update(uint32_t nowMs) {
     }
 }
 
+bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t count) {
+    // Four records keep JSON datagrams comfortably below the common Ethernet MTU.
+    char payload[1600];
+    int length = snprintf(payload, sizeof(payload),
+                          "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"records\":[",
+                          config::DEVICE_ID);
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(payload)) return false;
+
+    for (size_t i = 0; i < count; ++i) {
+        const TelemetryRecord& record = records[i];
+        char latitude[24];
+        char longitude[24];
+        if (record.gpsValid) {
+            snprintf(latitude, sizeof(latitude), "%.7f", record.latitude);
+            snprintf(longitude, sizeof(longitude), "%.7f", record.longitude);
+        } else {
+            strcpy(latitude, "null");
+            strcpy(longitude, "null");
+        }
+        const int written = snprintf(
+            payload + length, sizeof(payload) - static_cast<size_t>(length),
+            "%s{\"sequence\":%llu,\"timestamp\":\"%s\",\"timestampValid\":%s,"
+            "\"accel_x\":%u,\"accel_y\":%u,\"accel_z\":%u,"
+            "\"mic_raw\":%u,\"mic_p2p\":%u,\"mic_rms\":%.3f,"
+            "\"latitude\":%s,\"longitude\":%s}",
+            i ? "," : "", static_cast<unsigned long long>(record.sequence), record.timestamp,
+            record.timestamp[0] ? "true" : "false", record.accelX, record.accelY, record.accelZ,
+            record.micRaw, record.micP2p, record.micRms, latitude, longitude);
+        if (written <= 0 || static_cast<size_t>(written) >= sizeof(payload) - static_cast<size_t>(length)) {
+            return false;
+        }
+        length += written;
+    }
+
+    const int suffixLength = snprintf(payload + length, sizeof(payload) - static_cast<size_t>(length), "]}");
+    if (suffixLength <= 0 || static_cast<size_t>(suffixLength) >= sizeof(payload) - static_cast<size_t>(length) ||
+        !udp_.beginPacket(config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT)) return false;
+    length += suffixLength;
+    udp_.write(reinterpret_cast<const uint8_t*>(payload), length);
+    return udp_.endPacket() == 1;
+}
+
+void WifiTransport::receiveAcknowledgements() {
+    while (udp_.parsePacket() > 0) {
+        char payload[256] = {};
+        const int length = udp_.read(reinterpret_cast<uint8_t*>(payload), sizeof(payload) - 1);
+        if (length <= 0) continue;
+        payload[length] = '\0';
+        if (!recordInFlight_ || !strstr(payload, "\"type\":\"ack_batch\"") ||
+            !strstr(payload, config::DEVICE_ID)) continue;
+        char* sequenceField = strstr(payload, "\"sequences\":[");
+        if (!sequenceField) continue;
+        char* cursor = sequenceField + strlen("\"sequences\":[");
+        bool matches = true;
+        for (uint8_t i = 0; i < inFlightCount_; ++i) {
+            char* end = nullptr;
+            const uint64_t sequence = strtoull(cursor, &end, 10);
+            if (end == cursor || sequence != inFlightSequences_[i]) {
+                matches = false;
+                break;
+            }
+            cursor = end;
+            if (i + 1 < inFlightCount_) {
+                if (*cursor++ != ',') { matches = false; break; }
+            } else if (*cursor != ']') {
+                matches = false;
+            }
+        }
+        if (!matches) continue;
+        bool acknowledged = true;
+        for (uint8_t i = 0; i < inFlightCount_; ++i) {
+            if (!spool_.acknowledge(inFlightSequences_[i])) {
+                acknowledged = false;
+                break;
+            }
+        }
+        if (acknowledged) {
+            inFlightCount_ = 0;
+            recordInFlight_ = false;
+        }
+    }
+}
+
 bool WifiTransport::sendStatus(uint32_t nowMs) {
     // 状态包使用 JSON，字段结构与 data_show/gun_wifi_monitor.py 的解析保持一致。
     char payload[1024];
     char timestamp[20];
-    const bool timestampValid = formatRtcTimestamp(timestamp, sizeof(timestamp));
+    const bool timestampValid = formatTimestamp(timestamp, sizeof(timestamp));
     const String localIp = WiFi.localIP().toString();
     const int length = snprintf(
         payload, sizeof(payload),
@@ -161,7 +301,7 @@ bool WifiTransport::enqueue(const ShotEvent& event) {
     QueuedEvent queued;
     queued.type = EventType::Shot;
     queued.shot = event;
-    formatRtcTimestamp(queued.timestamp, sizeof(queued.timestamp));
+    formatTimestamp(queued.timestamp, sizeof(queued.timestamp));
     if (!enqueueEvent(queued)) return false;
     lastShotCount_ = event.shotCount;
     return true;
@@ -172,7 +312,7 @@ bool WifiTransport::enqueueVoiceDetection(const VoiceEvent& event, uint32_t dete
     queued.type = EventType::Voice;
     queued.voice = event;
     queued.detectionCount = detectionCount;
-    formatRtcTimestamp(queued.timestamp, sizeof(queued.timestamp));
+    formatTimestamp(queued.timestamp, sizeof(queued.timestamp));
     return enqueueEvent(queued);
 }
 
@@ -182,7 +322,7 @@ bool WifiTransport::enqueueVibrationDetection(const VibrateEvent& event,
     queued.type = EventType::Vibration;
     queued.vibration = event;
     queued.detectionCount = detectionCount;
-    formatRtcTimestamp(queued.timestamp, sizeof(queued.timestamp));
+    formatTimestamp(queued.timestamp, sizeof(queued.timestamp));
     return enqueueEvent(queued);
 }
 
