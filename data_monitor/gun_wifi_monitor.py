@@ -274,7 +274,7 @@ class MonitorWindow(QMainWindow):
             ("rssi", "WiFi 信号"), ("shots", "融合射击次数"),
             ("detection_counts", "检测次数"),
             ("flags", "检测标志"), ("gps_location", "GPS 定位"),
-            ("gps_details", "GPS 信息"),
+            ("gps_details", "GPS 信息"), ("storage_test", "Flash 容量测试"),
             ("mic", "麦克风"), ("accel", "三轴原始值"),
             ("tilt", "静态倾斜角"),
             ("vibration", "振动量 / 变化量"),
@@ -432,6 +432,7 @@ class MonitorWindow(QMainWindow):
         vibration = packet.get("vibration") or {}
         tilt = packet.get("tilt") or {}
         gps = packet.get("gps") or {}
+        storage_test = packet.get("storageTest") or {}
         flags = packet.get("flags") or {}
         uptime = packet.get("uptimeMs")
         try:
@@ -483,6 +484,19 @@ class MonitorWindow(QMainWindow):
         self.values["altitude"].setText(f"海拔：{self.number(gps.get('altitudeM'))} m")
         self.values["speed"].setText(f"速度：{self.number(gps.get('speedKmph'))} km/h")
         self.values["satellites"].setText(f"卫星数：{gps.get('satellites', '—')}")
+        if not storage_test.get("enabled", False):
+            self.values["storage_test"].setText("未启用")
+        elif storage_test.get("full", False):
+            self.values["storage_test"].setText(
+                f"已存满：{storage_test.get('records', 0)} 条\n"
+                f"占用：{storage_test.get('usedBytes', 0)}/"
+                f"{storage_test.get('totalBytes', 0)} 字节"
+            )
+        else:
+            self.values["storage_test"].setText(
+                f"当前已存入：{storage_test.get('currentRecords', 0)} 条\n"
+                "测试记录中，尚未存满"
+            )
         self.values["mic"].setText(
             f"raw {mic.get('raw', '—')}   P2P {mic.get('p2p', '—')}   RMS {self.number(mic.get('rms'))}"
         )

@@ -2,7 +2,13 @@
 
 #include <Arduino.h>
 
+#ifndef GUN_CAPACITY_TEST_MODE
+#define GUN_CAPACITY_TEST_MODE 0
+#endif
+
 namespace config {
+
+inline constexpr bool CAPACITY_TEST_MODE = GUN_CAPACITY_TEST_MODE != 0;
 
 // 硬件引脚定义（ESP32-S3）。
 inline constexpr uint8_t MIC_ADC_PIN = 8;       // ADC1_CH7
@@ -51,7 +57,8 @@ inline constexpr uint16_t DEVICE_UDP_PORT = 8889;  // 接收电脑端入库确�
 inline constexpr char NTP_SERVER[] = "pool.ntp.org";
 inline constexpr char DEVICE_ID[] = "gun_dection";
 inline constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;      //Wi-Fi 重新连接的时间间隔
-inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 50;          // UDP 状态包发送的时间间隔
+inline constexpr uint32_t TELEMETRY_SPOOL_INTERVAL_MS = 50;       // 遥测记录写入 Flash 的目标间隔
+inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 250;            // UDP 状态包每秒发送 4 次
 
 // 串口诊断信息的输出周期。
 inline constexpr uint32_t DIAGNOSTIC_INTERVAL_MS = 500;

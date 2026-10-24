@@ -32,7 +32,7 @@ static bool formatTimestamp(char* buffer, size_t size) {
 }
 
 void WifiTransport::begin() {
-    spool_.begin();
+    spool_.begin(config::CAPACITY_TEST_MODE);
     enabled_ = config::WIFI_SSID[0] != '\0' && config::UPPER_COMPUTER_HOST[0] != '\0';
     if (!enabled_) {
         Serial.println("Wi-Fi upload disabled: configure WIFI_SSID and UPPER_COMPUTER_HOST.");
@@ -56,20 +56,34 @@ void WifiTransport::setTelemetry(const WifiTelemetry& telemetry) {
 }
 
 void WifiTransport::update(uint32_t nowMs) {
-    if (nowMs - lastSpoolMs_ >= config::UDP_STATUS_INTERVAL_MS) {
+    if (nowMs - lastSpoolMs_ >= config::TELEMETRY_SPOOL_INTERVAL_MS) {
         lastSpoolMs_ = nowMs;
-        TelemetryRecord record;
-        formatTimestamp(record.timestamp, sizeof(record.timestamp));
-        record.accelX = telemetry_.vibrationX;
-        record.accelY = telemetry_.vibrationY;
-        record.accelZ = telemetry_.vibrationZ;
-        record.micRaw = telemetry_.micRaw;
-        record.micP2p = telemetry_.micPeakToPeak;
-        record.micRms = telemetry_.micRms;
-        record.latitude = telemetry_.latitude;
-        record.longitude = telemetry_.longitude;
-        record.gpsValid = telemetry_.gpsValid ? 1 : 0;
-        spool_.append(record);
+        if (!spool_.capacityTestFull()) {
+            TelemetryRecord record;
+            formatTimestamp(record.timestamp, sizeof(record.timestamp));
+            record.accelX = telemetry_.vibrationX;
+            record.accelY = telemetry_.vibrationY;
+            record.accelZ = telemetry_.vibrationZ;
+            record.micRaw = telemetry_.micRaw;
+            record.micP2p = telemetry_.micPeakToPeak;
+            record.micRms = telemetry_.micRms;
+            record.latitude = telemetry_.latitude;
+            record.longitude = telemetry_.longitude;
+            record.gpsValid = telemetry_.gpsValid ? 1 : 0;
+            const bool appended = spool_.append(record);
+            if (appended) {
+                ++telemetryWritesTotal_;
+            } else if (spool_.capacityTestMode() && spool_.full()) {
+                spool_.latchCapacityTestFull();
+            }
+        } else if (spool_.capacityTestMode() && !spool_.capacityTestResultSaved()) {
+            spool_.latchCapacityTestFull();
+        }
+    }
+    if (nowMs - lastSpoolRateMs_ >= 1000) {
+        lastSpoolRateMs_ = nowMs;
+        telemetryWritesPerSecond_ = telemetryWritesTotal_ - lastSpoolRateTotal_;
+        lastSpoolRateTotal_ = telemetryWritesTotal_;
     }
     if (!enabled_) {
         return;
@@ -112,7 +126,8 @@ void WifiTransport::update(uint32_t nowMs) {
     }
 
     receiveAcknowledgements();
-    if (!recordInFlight_ || nowMs - lastRecordSendMs_ >= 500) {
+    const bool capacityTestUploadEnabled = !spool_.capacityTestMode() || spool_.capacityTestFull();
+    if (capacityTestUploadEnabled && (!recordInFlight_ || nowMs - lastRecordSendMs_ >= 500)) {
         TelemetryRecord records[TELEMETRY_BATCH_SIZE];
         const size_t count = spool_.peekBatch(records, TELEMETRY_BATCH_SIZE);
         if (count > 0 && sendTelemetryBatch(records, count)) {
@@ -224,7 +239,7 @@ void WifiTransport::receiveAcknowledgements() {
 
 bool WifiTransport::sendStatus(uint32_t nowMs) {
     // 状态包使用 JSON，字段结构与 data_show/gun_wifi_monitor.py 的解析保持一致。
-    char payload[1024];
+    char payload[1400];
     char timestamp[20];
     const bool timestampValid = formatTimestamp(timestamp, sizeof(timestamp));
     const String localIp = WiFi.localIP().toString();
@@ -247,6 +262,9 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"altitudeM\":%.1f,\"speedKmph\":%.1f,\"hdop\":%.1f,"
         "\"satellites\":%lu,\"ageMs\":%lu,\"chars\":%lu,"
         "\"failedChecksums\":%lu},"
+        "\"storageTest\":{\"enabled\":%s,\"full\":%s,\"records\":%llu,"
+        "\"currentRecords\":%llu,"
+        "\"usedBytes\":%lu,\"totalBytes\":%lu},"
         "\"sampleDrops\":{\"voice\":%lu,\"vibration\":%lu}}\r\n",
         config::DEVICE_ID, timestamp, timestampValid ? "true" : "false",
         static_cast<unsigned long>(nowMs), localIp.c_str(),
@@ -272,6 +290,12 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         static_cast<unsigned long>(telemetry_.gpsAgeMs),
         static_cast<unsigned long>(telemetry_.gpsCharacters),
         static_cast<unsigned long>(telemetry_.gpsFailedChecksums),
+        spool_.capacityTestMode() ? "true" : "false",
+        spool_.capacityTestFull() ? "true" : "false",
+        static_cast<unsigned long long>(spool_.capacityTestRecordCount()),
+        static_cast<unsigned long long>(spool_.capacityTestCurrentRecordCount()),
+        static_cast<unsigned long>(spool_.capacityTestUsedBytes()),
+        static_cast<unsigned long>(spool_.capacityTestTotalBytes()),
         static_cast<unsigned long>(telemetry_.voiceDroppedSamples),
         static_cast<unsigned long>(telemetry_.vibrationDroppedSamples));
 
@@ -292,8 +316,6 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
     }
 
     ++sentStatuses_;
-    Serial.printf("UDP STATUS OK -> %s:%u bytes=%d: %s\n",
-                  config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT, length, payload);
     return true;
 }
 

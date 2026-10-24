@@ -22,16 +22,26 @@ struct __attribute__((packed)) TelemetryRecord {
 
 class TelemetrySpool {
 public:
-    bool begin();
+    bool begin(bool capacityTestMode = false);
     bool append(const TelemetryRecord& sample);
     bool peek(TelemetryRecord& sample);
     size_t peekBatch(TelemetryRecord* records, size_t capacity);
     bool acknowledge(uint64_t sequence);
+    void latchCapacityTestFull();
+    uint64_t pendingCount() const;
+    uint64_t capacityTestCurrentRecordCount() const { return capacityTestCurrentRecordCount_; }
+    bool capacityTestMode() const { return capacityTestMode_; }
+    bool capacityTestFull() const { return capacityTestFull_; }
+    bool capacityTestResultSaved() const { return capacityTestResultSaved_; }
+    uint64_t capacityTestRecordCount() const { return capacityTestRecordCount_; }
+    uint32_t capacityTestUsedBytes() const { return capacityTestUsedBytes_; }
+    uint32_t capacityTestTotalBytes() const { return capacityTestTotalBytes_; }
     bool full() const { return full_; }
     uint64_t lastSequence() const { return nextSequence_ ? nextSequence_ - 1 : 0; }
 
 private:
     static constexpr size_t SEGMENT_BYTES = 32768;
+    static constexpr uint32_t LITTLEFS_WRITE_RESERVE_BYTES = 8192;
     static constexpr uint32_t RECORD_MAGIC = 0x544C4D31;
     static constexpr uint32_t SEGMENT_LIMIT = 256;
     static uint32_t checksum(const TelemetryRecord& record);
@@ -48,9 +58,17 @@ private:
     uint64_t reservedSequenceEnd_ = 1;
     uint64_t acknowledgedSequence_ = 0;
     uint64_t persistedAcknowledgedSequence_ = 0;
+    uint64_t capacityTestRecordCount_ = 0;
+    uint64_t capacityTestCurrentRecordCount_ = 0;
+    uint32_t capacityTestUsedBytes_ = 0;
+    uint32_t capacityTestTotalBytes_ = 0;
     TelemetryRecord segmentHeads_[SEGMENT_LIMIT] = {};
     size_t segmentOffsets_[SEGMENT_LIMIT] = {};
     bool segmentHasPending_[SEGMENT_LIMIT] = {};
+    bool segmentAppendable_[SEGMENT_LIMIT] = {};
     bool mounted_ = false;
     bool full_ = false;
+    bool capacityTestMode_ = false;
+    bool capacityTestFull_ = false;
+    bool capacityTestResultSaved_ = false;
 };

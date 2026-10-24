@@ -55,6 +55,8 @@ public:
     uint8_t queuedEvents() const { return count_; }
     uint32_t sentEvents() const { return sentEvents_; }
     uint32_t sentStatuses() const { return sentStatuses_; }
+    uint32_t telemetryWritesPerSecond() const { return telemetryWritesPerSecond_; }
+    uint32_t telemetryWritesTotal() const { return telemetryWritesTotal_; }
     uint32_t failedSends() const { return failedSends_; }
     uint32_t droppedEvents() const { return droppedEvents_; }
 
@@ -86,12 +88,16 @@ private:
     uint32_t lastConnectAttemptMs_ = 0;
     uint32_t lastStatusMs_ = 0;
     uint32_t lastSpoolMs_ = 0;
+    uint32_t lastSpoolRateMs_ = 0;
+    uint32_t lastSpoolRateTotal_ = 0;
     uint32_t lastRecordSendMs_ = 0;
     uint64_t inFlightSequences_[TELEMETRY_BATCH_SIZE] = {};
     uint8_t inFlightCount_ = 0;
     uint32_t lastSendErrorLogMs_ = 0;
     uint32_t sentEvents_ = 0;
     uint32_t sentStatuses_ = 0;
+    uint32_t telemetryWritesTotal_ = 0;
+    uint32_t telemetryWritesPerSecond_ = 0;
     uint32_t lastShotCount_ = 0;
     uint32_t failedSends_ = 0;
     uint32_t droppedEvents_ = 0;

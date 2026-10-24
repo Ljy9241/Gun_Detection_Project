@@ -126,7 +126,8 @@ void loop() {
         Serial.printf(
             "mic[raw=%u p2p=%u rms=%.1f] mma[%s x=%u y=%u z=%u mag=%.1f jerk=%.1f] "
             "flags[%d,%d] gps[%s sats=%lu chars=%lu] wifi[%s] "
-            "udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] dropped[%lu,%lu]\n",
+            "spool[written=%lu rate=%lu/s] udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] "
+            "dropped[%lu,%lu]\n",
             voiceDetection.latestRaw(), voiceDetection.latestPeakToPeak(),
             voiceDetection.latestRms(), vibrateDetection.calibrated() ? "ready" : "cal",
             vibrateDetection.rawX(), vibrateDetection.rawY(), vibrateDetection.rawZ(),
@@ -135,6 +136,8 @@ void loop() {
             static_cast<unsigned long>(fix.satellites),
             static_cast<unsigned long>(gps.parsedCharacters()),
             wifiTransport.connected() ? "connected" : (wifiTransport.enabled() ? "search" : "off"),
+            static_cast<unsigned long>(wifiTransport.telemetryWritesTotal()),
+            static_cast<unsigned long>(wifiTransport.telemetryWritesPerSecond()),
             wifiTransport.queuedEvents(),
             static_cast<unsigned long>(wifiTransport.sentEvents()),
             static_cast<unsigned long>(wifiTransport.sentStatuses()),

@@ -27,7 +27,8 @@ void TelemetrySpool::segmentPath(uint32_t index, char* path, size_t size) {
     snprintf(path, size, "/q%08lu.bin", static_cast<unsigned long>(index));
 }
 
-bool TelemetrySpool::begin() {
+bool TelemetrySpool::begin(bool capacityTestMode) {
+    capacityTestMode_ = capacityTestMode;
     if (!preferences.begin("tlm-spool", false)) {
         Serial.println("Telemetry spool: NVS open failed.");
         return false;
@@ -51,6 +52,58 @@ bool TelemetrySpool::begin() {
     const uint64_t previousReservedEnd = preferences.getULong64("seqend", 1);
     nextSequence_ = max(nextSequence_, previousReservedEnd);
     reservedSequenceEnd_ = previousReservedEnd;
+
+    if (capacityTestMode_ && !preferences.getBool("ctinit", false)) {
+        // This dedicated test build clears queued records once, while preserving
+        // monotonic sequence numbers so PC-side receipts can never collide.
+        for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
+            char path[20];
+            segmentPath(index, path, sizeof(path));
+            if (LittleFS.exists(path) && !LittleFS.remove(path)) {
+                Serial.printf("Capacity test: failed to remove old segment %lu.\n",
+                              static_cast<unsigned long>(index));
+                return false;
+            }
+        }
+        acknowledgedSequence_ = nextSequence_ ? nextSequence_ - 1 : 0;
+        if (preferences.putULong64("acked", acknowledgedSequence_) != sizeof(uint64_t) ||
+            preferences.putBool("ctfull", false) == 0 ||
+            preferences.putULong64("ctcount", 0) != sizeof(uint64_t) ||
+            preferences.putUInt("ctused", 0) == 0 ||
+            preferences.putUInt("cttotal", LittleFS.totalBytes()) == 0 ||
+            preferences.putBool("ctinit", true) == 0) {
+            Serial.println("Capacity test: failed to initialize test metadata.");
+            return false;
+        }
+        persistedAcknowledgedSequence_ = acknowledgedSequence_;
+        if (!scan()) {
+            Serial.println("Capacity test: scan failed after clearing old data.");
+            return false;
+        }
+        reservedSequenceEnd_ = previousReservedEnd;
+        Serial.println("Capacity test: old LittleFS telemetry cache cleared once.");
+    }
+
+    capacityTestFull_ = capacityTestMode_ && preferences.getBool("ctfull", false);
+    capacityTestResultSaved_ = capacityTestFull_;
+    capacityTestRecordCount_ = capacityTestMode_ ? preferences.getULong64("ctcount", 0) : 0;
+    capacityTestCurrentRecordCount_ = capacityTestMode_
+        ? (capacityTestFull_ ? capacityTestRecordCount_ : pendingCount())
+        : 0;
+    capacityTestUsedBytes_ = capacityTestMode_ ? preferences.getUInt("ctused", 0) : 0;
+    capacityTestTotalBytes_ = capacityTestMode_ ? preferences.getUInt("cttotal", LittleFS.totalBytes()) : 0;
+    if (capacityTestFull_) full_ = true;
+    if (capacityTestMode_) {
+        if (capacityTestFull_) {
+            Serial.printf("CAPACITY_TEST_RESULT records=%llu used=%lu/%lu bytes\n",
+                          static_cast<unsigned long long>(capacityTestRecordCount_),
+                          static_cast<unsigned long>(capacityTestUsedBytes_),
+                          static_cast<unsigned long>(capacityTestTotalBytes_));
+        } else {
+            Serial.println("CAPACITY_TEST_ACTIVE: telemetry uploads will wait until storage is full.");
+        }
+    }
+
     if (!reserveSequenceBlock()) {
         Serial.println("Telemetry spool: cannot reserve unique sequence numbers.");
         return false;
@@ -76,6 +129,7 @@ bool TelemetrySpool::scan() {
     memset(segmentHeads_, 0, sizeof(segmentHeads_));
     memset(segmentOffsets_, 0, sizeof(segmentOffsets_));
     memset(segmentHasPending_, 0, sizeof(segmentHasPending_));
+    memset(segmentAppendable_, 0, sizeof(segmentAppendable_));
     uint64_t maximumSequence = acknowledgedSequence_;
     latestSegment_ = 0;
     bool anySegment = false;
@@ -98,6 +152,9 @@ bool TelemetrySpool::scan() {
             }
             offset += sizeof(record);
         }
+        segmentAppendable_[index] = offset == file.size() &&
+                                    file.size() % sizeof(TelemetryRecord) == 0 &&
+                                    file.size() <= SEGMENT_BYTES;
         file.close();
     }
     if (!anySegment) latestSegment_ = 0;
@@ -106,7 +163,15 @@ bool TelemetrySpool::scan() {
 }
 
 bool TelemetrySpool::append(const TelemetryRecord& sample) {
-    if (!mounted_ || full_) return false;
+    if (!mounted_ || full_ || capacityTestFull_) return false;
+    const uint32_t totalBytes = LittleFS.totalBytes();
+    const uint32_t usedBytes = LittleFS.usedBytes();
+    if (totalBytes <= usedBytes || totalBytes - usedBytes <= LITTLEFS_WRITE_RESERVE_BYTES) {
+        full_ = true;
+        Serial.printf("Telemetry spool full: preserving %lu free LittleFS bytes.\n",
+                      totalBytes > usedBytes ? static_cast<unsigned long>(totalBytes - usedBytes) : 0UL);
+        return false;
+    }
     if (nextSequence_ >= reservedSequenceEnd_ && !reserveSequenceBlock()) {
         full_ = true;
         return false;
@@ -119,23 +184,15 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
     char path[20];
     uint32_t targetSegment = latestSegment_;
     segmentPath(targetSegment, path, sizeof(path));
-    File file = LittleFS.open(path, FILE_APPEND);
-    bool usableSegment = static_cast<bool>(file);
-    if (file && (file.size() % sizeof(TelemetryRecord) != 0 ||
-                 file.size() + sizeof(record) > SEGMENT_BYTES)) {
-        usableSegment = false;
-    }
-    if (usableSegment) {
-        File check = LittleFS.open(path, FILE_READ);
-        if (!check) usableSegment = false;
-        TelemetryRecord existing;
-        while (check && check.read(reinterpret_cast<uint8_t*>(&existing), sizeof(existing)) == sizeof(existing)) {
-            if (!valid(existing)) {
-                usableSegment = false;
-                break;
-            }
+    File file;
+    bool usableSegment = false;
+    if (segmentAppendable_[targetSegment]) {
+        file = LittleFS.open(path, FILE_APPEND);
+        usableSegment = static_cast<bool>(file);
+        if (file && (file.size() % sizeof(TelemetryRecord) != 0 ||
+                     file.size() + sizeof(record) > SEGMENT_BYTES)) {
+            usableSegment = false;
         }
-        if (check) check.close();
     }
     if (!usableSegment) {
         file.close();
@@ -150,7 +207,13 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
             latestSegment_ = max(latestSegment_, index);
             file = LittleFS.open(path, FILE_WRITE);
             foundSlot = static_cast<bool>(file);
-            if (foundSlot) break;
+            if (!foundSlot) {
+                full_ = true;
+                Serial.printf("Telemetry spool full: cannot create segment %lu.\n",
+                              static_cast<unsigned long>(index));
+                return false;
+            }
+            break;
         }
         if (!foundSlot) {
             full_ = true;
@@ -170,7 +233,9 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
         segmentOffsets_[targetSegment] = recordOffset;
         segmentHasPending_[targetSegment] = true;
     }
+    segmentAppendable_[targetSegment] = true;
     ++nextSequence_;
+    if (capacityTestMode_) ++capacityTestCurrentRecordCount_;
     return true;
 }
 
@@ -252,6 +317,47 @@ size_t TelemetrySpool::peekBatch(TelemetryRecord* records, size_t capacity) {
     return count;
 }
 
+uint64_t TelemetrySpool::pendingCount() const {
+    if (!mounted_) return 0;
+
+    uint64_t count = 0;
+    for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
+        char path[20];
+        segmentPath(index, path, sizeof(path));
+        File file = LittleFS.open(path, FILE_READ);
+        if (!file) continue;
+        TelemetryRecord record;
+        while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
+            if (!valid(record)) break;
+            if (record.sequence > acknowledgedSequence_) ++count;
+        }
+        file.close();
+    }
+    return count;
+}
+
+void TelemetrySpool::latchCapacityTestFull() {
+    if (!capacityTestMode_ || capacityTestResultSaved_) return;
+
+    if (!capacityTestFull_) {
+        capacityTestFull_ = true;
+        full_ = true;
+        capacityTestRecordCount_ = pendingCount();
+        capacityTestUsedBytes_ = static_cast<uint32_t>(LittleFS.usedBytes());
+        capacityTestTotalBytes_ = static_cast<uint32_t>(LittleFS.totalBytes());
+    }
+
+    const bool saved = preferences.putULong64("ctcount", capacityTestRecordCount_) == sizeof(uint64_t) &&
+                       preferences.putUInt("ctused", capacityTestUsedBytes_) > 0 &&
+                       preferences.putUInt("cttotal", capacityTestTotalBytes_) > 0 &&
+                       preferences.putBool("ctfull", true) > 0;
+    capacityTestResultSaved_ = saved;
+    Serial.printf("CAPACITY_TEST_FULL records=%llu used=%lu/%lu bytes saved=%s\n",
+                  static_cast<unsigned long long>(capacityTestRecordCount_),
+                  static_cast<unsigned long>(capacityTestUsedBytes_),
+                  static_cast<unsigned long>(capacityTestTotalBytes_), saved ? "yes" : "no");
+}
+
 bool TelemetrySpool::acknowledge(uint64_t sequence) {
     if (sequence <= acknowledgedSequence_) return true;
     TelemetryRecord pending;
@@ -272,7 +378,10 @@ bool TelemetrySpool::acknowledge(uint64_t sequence) {
         }
         char path[20];
         segmentPath(segment, path, sizeof(path));
-        if (LittleFS.remove(path)) full_ = false;
+        if (LittleFS.remove(path)) {
+            segmentAppendable_[segment] = false;
+            if (!capacityTestFull_) full_ = false;
+        }
     }
     return true;
 }
@@ -303,7 +412,10 @@ bool TelemetrySpool::compactAcknowledgedSegments() {
                 }
                 persistedAcknowledgedSequence_ = acknowledgedSequence_;
             }
-            if (LittleFS.remove(path)) changed = true;
+            if (LittleFS.remove(path)) {
+                segmentAppendable_[index] = false;
+                changed = true;
+            }
         }
     }
     if (changed) full_ = false;
