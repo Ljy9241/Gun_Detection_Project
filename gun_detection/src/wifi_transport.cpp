@@ -41,6 +41,7 @@ void WifiTransport::begin() {
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(true);
     WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
+    radioEnabled_ = true;
     lastConnectAttemptMs_ = millis();
     Serial.printf("Wi-Fi connecting: ssid=%s, UDP target=%s:%u\n", config::WIFI_SSID,
                   config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT);
@@ -55,8 +56,24 @@ void WifiTransport::setTelemetry(const WifiTelemetry& telemetry) {
     windowVibrationJerk_ = max(windowVibrationJerk_, telemetry.vibrationJerk);
 }
 
+void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
+    if (lowPowerMode_ == enabled) return;
+    lowPowerMode_ = enabled;
+    if (enabled) {
+        lowPowerCycleStartMs_ = nowMs;  // 进入低功耗时立即开启第一个 Wi-Fi 窗口。
+        lastSpoolMs_ = nowMs;
+        Serial.println("LOW_POWER_ENTER: telemetry interval=10s, Wi-Fi window=2min/10min.");
+    } else {
+        lastSpoolMs_ = nowMs - config::TELEMETRY_SPOOL_INTERVAL_MS;
+        Serial.println("LOW_POWER_EXIT: returning to normal sampling and Wi-Fi.");
+    }
+}
+
 void WifiTransport::update(uint32_t nowMs) {
-    if (nowMs - lastSpoolMs_ >= config::TELEMETRY_SPOOL_INTERVAL_MS) {
+    const uint32_t spoolIntervalMs = lowPowerMode_
+        ? config::LOW_POWER_TELEMETRY_INTERVAL_MS
+        : config::TELEMETRY_SPOOL_INTERVAL_MS;
+    if (nowMs - lastSpoolMs_ >= spoolIntervalMs) {
         lastSpoolMs_ = nowMs;
         if (!spool_.capacityTestFull()) {
             TelemetryRecord record;
@@ -85,7 +102,31 @@ void WifiTransport::update(uint32_t nowMs) {
         telemetryWritesPerSecond_ = telemetryWritesTotal_ - lastSpoolRateTotal_;
         lastSpoolRateTotal_ = telemetryWritesTotal_;
     }
-    if (!enabled_) {
+    bool radioShouldBeOn = enabled_;
+    if (enabled_ && lowPowerMode_) {
+        const uint32_t phaseMs = (nowMs - lowPowerCycleStartMs_) % config::LOW_POWER_WIFI_CYCLE_MS;
+        radioShouldBeOn = phaseMs < config::LOW_POWER_WIFI_WINDOW_MS;
+    }
+    if (radioShouldBeOn != radioEnabled_) {
+        if (radioShouldBeOn) {
+            WiFi.mode(WIFI_STA);
+            WiFi.setSleep(true);
+            WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
+            lastConnectAttemptMs_ = nowMs;
+            radioEnabled_ = true;
+            wasConnected_ = false;
+            Serial.println("Low-power Wi-Fi window started.");
+        } else {
+            udp_.stop();
+            ackListenerStarted_ = false;
+            WiFi.disconnect();
+            WiFi.mode(WIFI_OFF);
+            radioEnabled_ = false;
+            wasConnected_ = false;
+            Serial.println("Low-power Wi-Fi window ended; unacknowledged data retained.");
+        }
+    }
+    if (!enabled_ || !radioEnabled_) {
         return;
     }
 
@@ -247,6 +288,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         payload, sizeof(payload),
         "{\"type\":\"status\",\"deviceId\":\"%s\",\"timestamp\":\"%s\","
         "\"timestampValid\":%s,\"uptimeMs\":%lu,"
+        "\"lowPowerMode\":%s,"
         "\"localIp\":\"%s\",\"rssi\":%ld,"
         "\"mic\":{\"raw\":%u,\"p2p\":%u,\"rms\":%.1f,"
         "\"maxP2P5s\":%u,\"maxRms5s\":%.1f},"
@@ -267,7 +309,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"usedBytes\":%lu,\"totalBytes\":%lu},"
         "\"sampleDrops\":{\"voice\":%lu,\"vibration\":%lu}}\r\n",
         config::DEVICE_ID, timestamp, timestampValid ? "true" : "false",
-        static_cast<unsigned long>(nowMs), localIp.c_str(),
+        static_cast<unsigned long>(nowMs), lowPowerMode_ ? "true" : "false", localIp.c_str(),
         static_cast<long>(WiFi.RSSI()), telemetry_.micRaw, telemetry_.micPeakToPeak,
         telemetry_.micRms, windowMicPeakToPeak_, windowMicRms_,
         telemetry_.vibrationReady ? "true" : "false", telemetry_.vibrationX,

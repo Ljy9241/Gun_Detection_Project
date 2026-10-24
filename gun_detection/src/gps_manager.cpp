@@ -19,13 +19,30 @@ void GpsManager::begin(uint8_t enablePin, uint8_t ppsPin, int8_t rxPin, int8_t t
                        uint32_t baud) {
     enablePin_ = enablePin;
     ppsPin_ = ppsPin;
+    rxPin_ = rxPin;
+    txPin_ = txPin;
+    baud_ = baud;
     pinMode(enablePin_, OUTPUT);
     digitalWrite(enablePin_, HIGH);  // 当前硬件配置为高电平使能 GPS。
     pinMode(ppsPin_, INPUT);
     serial_.begin(baud, SERIAL_8N1, rxPin, txPin);
+    enabled_ = true;
+}
+
+void GpsManager::setEnabled(bool enabled) {
+    if (enabled == enabled_) return;
+    if (enabled) {
+        digitalWrite(enablePin_, HIGH);
+        serial_.begin(baud_, SERIAL_8N1, rxPin_, txPin_);
+    } else {
+        serial_.end();
+        digitalWrite(enablePin_, LOW);
+    }
+    enabled_ = enabled;
 }
 
 void GpsManager::update() {
+    if (!enabled_) return;
     // 尽可能清空串口接收缓冲区，避免主循环期间 NMEA 数据积压。
     while (serial_.available() > 0) {
         gps_.encode(static_cast<char>(serial_.read()));

@@ -45,12 +45,14 @@ public:
     // 建立 Wi-Fi 站点连接；网络不可用时由 update 周期重试。
     void begin();
     void setTelemetry(const WifiTelemetry& telemetry);
+    void setLowPowerMode(bool enabled, uint32_t nowMs);
     void update(uint32_t nowMs);
     bool enqueue(const ShotEvent& event);
     bool enqueueVoiceDetection(const VoiceEvent& event, uint32_t detectionCount);
     bool enqueueVibrationDetection(const VibrateEvent& event, uint32_t detectionCount);
 
     bool enabled() const { return enabled_; }
+    bool radioEnabled() const { return radioEnabled_; }
     bool connected() const { return WiFi.status() == WL_CONNECTED; }
     uint8_t queuedEvents() const { return count_; }
     uint32_t sentEvents() const { return sentEvents_; }
@@ -90,6 +92,7 @@ private:
     uint32_t lastSpoolMs_ = 0;
     uint32_t lastSpoolRateMs_ = 0;
     uint32_t lastSpoolRateTotal_ = 0;
+    uint32_t lowPowerCycleStartMs_ = 0;
     uint32_t lastRecordSendMs_ = 0;
     uint64_t inFlightSequences_[TELEMETRY_BATCH_SIZE] = {};
     uint8_t inFlightCount_ = 0;
@@ -107,6 +110,8 @@ private:
     float windowVibrationMagnitude_ = 0.0F;
     float windowVibrationJerk_ = 0.0F;
     bool enabled_ = false;
+    bool lowPowerMode_ = false;
+    bool radioEnabled_ = false;
     bool wasConnected_ = false;
     bool recordInFlight_ = false;
     bool ackListenerStarted_ = false;

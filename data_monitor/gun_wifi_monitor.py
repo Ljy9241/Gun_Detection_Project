@@ -487,7 +487,7 @@ class MonitorWindow(QMainWindow):
         if not storage_test.get("enabled", False):
             self.values["storage_test"].setText(
                 f"当前待上传：{storage_test.get('pendingRecords', 0)} 条\n"
-                "普通模式，上传确认后释放记录"
+                f"运行模式：{'低功耗' if packet.get('lowPowerMode', False) else '普通'}"
             )
         elif storage_test.get("full", False):
             self.values["storage_test"].setText(

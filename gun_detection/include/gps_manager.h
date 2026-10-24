@@ -21,6 +21,8 @@ public:
     explicit GpsManager(HardwareSerial& serial) : serial_(serial) {}
 
     void begin(uint8_t enablePin, uint8_t ppsPin, int8_t rxPin, int8_t txPin, uint32_t baud);
+    void setEnabled(bool enabled);
+    bool enabled() const { return enabled_; }
     void update();  // 持续读取串口字节并交给 TinyGPSPlus 解析。
     GpsFix currentFix();  // 将解析器中的最新字段整理成快照。
     uint32_t parsedCharacters() const { return gps_.charsProcessed(); }
@@ -32,4 +34,8 @@ private:
     uint8_t enablePin_ = 0;
     uint8_t ppsPin_ = 0;
     uint32_t lastClockSyncEpoch_ = 0;
+    int8_t rxPin_ = -1;
+    int8_t txPin_ = -1;
+    uint32_t baud_ = 0;
+    bool enabled_ = false;
 };

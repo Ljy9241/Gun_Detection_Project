@@ -18,6 +18,11 @@ WifiTransport wifiTransport;
 uint32_t lastDiagnosticMs = 0;
 uint32_t voiceDetectionCount = 0;
 uint32_t vibrationDetectionCount = 0;
+bool lowPowerMode = false;
+uint64_t stationarySinceUs = 0;
+bool lowPowerGpsWindowActive = false;
+uint32_t lowPowerGpsWindowStartMs = 0;
+uint32_t nextLowPowerGpsStartMs = 0;
 
 static void printShot(const ShotEvent& shot) {
     // 输出融合事件摘要，便于不连接上位机时通过串口检查检测结果。
@@ -57,6 +62,57 @@ void loop() {
 
     voiceDetection.update(nowUs);
     vibrateDetection.update(nowUs);
+
+    if (!config::CAPACITY_TEST_MODE && vibrateDetection.calibrated()) {
+        const bool stationary = vibrateDetection.magnitude() <
+                                config::LOW_POWER_STATIONARY_ACCEL_THRESHOLD_COUNTS;
+        if (!lowPowerMode) {
+            if (stationary) {
+                if (stationarySinceUs == 0) stationarySinceUs = nowUs;
+                if (nowUs - stationarySinceUs >=
+                    static_cast<uint64_t>(config::LOW_POWER_STILLNESS_MS) * 1000ULL) {
+                    lowPowerMode = true;
+                    nextLowPowerGpsStartMs = nowMs;  // 首个 GPS 窗口立即启动。
+                    lowPowerGpsWindowActive = false;
+                    wifiTransport.setLowPowerMode(true, nowMs);
+                    Serial.println("Stillness >5s; entering low-power schedule.");
+                }
+            } else {
+                stationarySinceUs = 0;
+            }
+        } else if (!stationary) {
+            lowPowerMode = false;
+            stationarySinceUs = 0;
+            lowPowerGpsWindowActive = false;
+            gps.setEnabled(true);
+            wifiTransport.setLowPowerMode(false, nowMs);
+            Serial.println("Motion detected; normal mode restored.");
+        }
+    }
+
+    if (lowPowerMode) {
+        if (!lowPowerGpsWindowActive &&
+            static_cast<int32_t>(nowMs - nextLowPowerGpsStartMs) >= 0) {
+            gps.setEnabled(true);
+            lowPowerGpsWindowActive = true;
+            lowPowerGpsWindowStartMs = nowMs;
+            nextLowPowerGpsStartMs += config::LOW_POWER_GPS_CYCLE_MS;
+            Serial.println("Low-power GPS window started.");
+        }
+        if (lowPowerGpsWindowActive) {
+            const GpsFix windowFix = gps.currentFix();
+            const bool gotFix = windowFix.valid;
+            const bool timedOut = nowMs - lowPowerGpsWindowStartMs >= config::LOW_POWER_GPS_WINDOW_MS;
+            if (gotFix || timedOut) {
+                gps.setEnabled(false);
+                lowPowerGpsWindowActive = false;
+                Serial.println(gotFix ? "Low-power GPS fix acquired; GPS off."
+                                      : "Low-power GPS timed out after 5 minutes; GPS off.");
+            }
+        }
+    } else {
+        gps.setEnabled(true);
+    }
     gps.update();
 
     VoiceEvent voiceEvent;
@@ -125,17 +181,18 @@ void loop() {
         lastDiagnosticMs = nowMs;
         Serial.printf(
             "mic[raw=%u p2p=%u rms=%.1f] mma[%s x=%u y=%u z=%u mag=%.1f jerk=%.1f] "
-            "flags[%d,%d] gps[%s sats=%lu chars=%lu] wifi[%s] "
+            "flags[%d,%d] power[%s] gps[%s sats=%lu chars=%lu] wifi[%s] "
             "spool[written=%lu rate=%lu/s] udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] "
             "dropped[%lu,%lu]\n",
             voiceDetection.latestRaw(), voiceDetection.latestPeakToPeak(),
             voiceDetection.latestRms(), vibrateDetection.calibrated() ? "ready" : "cal",
             vibrateDetection.rawX(), vibrateDetection.rawY(), vibrateDetection.rawZ(),
             vibrateDetection.magnitude(), vibrateDetection.jerk(), shotDetector.flag1(),
-            shotDetector.flag2(), fix.valid ? "fix" : "search",
+            shotDetector.flag2(), lowPowerMode ? "low" : "normal", fix.valid ? "fix" : "search",
             static_cast<unsigned long>(fix.satellites),
             static_cast<unsigned long>(gps.parsedCharacters()),
-            wifiTransport.connected() ? "connected" : (wifiTransport.enabled() ? "search" : "off"),
+            wifiTransport.connected() ? "connected" :
+                (wifiTransport.radioEnabled() ? "search" : "off"),
             static_cast<unsigned long>(wifiTransport.telemetryWritesTotal()),
             static_cast<unsigned long>(wifiTransport.telemetryWritesPerSecond()),
             wifiTransport.queuedEvents(),
