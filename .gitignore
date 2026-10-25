@@ -1,3 +1,5 @@
 /csv/
 /data_monitor/amap_config.json
 /data_monitor/gun_telemetry.db*
+/.ppt_work/
+/output/

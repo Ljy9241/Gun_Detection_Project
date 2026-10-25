@@ -109,8 +109,8 @@ void loop() {
     }
 
     if (!config::CAPACITY_TEST_MODE && vibrateDetection.calibrated()) {
-        const bool stationary = vibrateDetection.magnitude() <
-                                config::LOW_POWER_STATIONARY_ACCEL_THRESHOLD_COUNTS;
+        const bool stationary = vibrateDetection.sampleDelta() <
+                                config::LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS;
         if (!lowPowerMode) {
             if (stationary) {
                 if (stationarySinceUs == 0) stationarySinceUs = nowUs;

@@ -43,6 +43,20 @@ void VibrateDetection::processSample(uint16_t rawX, uint16_t rawY, uint16_t rawZ
     rawY_ = rawY;
     rawZ_ = rawZ;
 
+    // 低功耗静止判断使用相邻采样的三轴向量差，不依赖静止基线。
+    if (previousRawSampleValid_) {
+        const float deltaX = static_cast<float>(rawX_) - previousRawX_;
+        const float deltaY = static_cast<float>(rawY_) - previousRawY_;
+        const float deltaZ = static_cast<float>(rawZ_) - previousRawZ_;
+        sampleDelta_ = sqrtf(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+    } else {
+        sampleDelta_ = 0.0F;
+        previousRawSampleValid_ = true;
+    }
+    previousRawX_ = rawX_;
+    previousRawY_ = rawY_;
+    previousRawZ_ = rawZ_;
+
     // 独立累计倾角校准样本，不延迟振动检测的 300 点启动校准。
     if (!angleCalibrationComplete_) {
         angleCalibrationSumX_ += rawX_;
