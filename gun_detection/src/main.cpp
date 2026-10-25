@@ -30,6 +30,8 @@ bool lowPowerMode = false;
 uint64_t stationarySinceUs = 0;
 bool lowPowerGpsWindowActive = false;
 uint32_t lowPowerGpsWindowStartMs = 0;
+bool lowPowerGpsFixHoldActive = false;
+uint32_t lowPowerGpsFixStartMs = 0;
 uint32_t nextLowPowerGpsStartMs = 0;
 
 static void printShot(const ShotEvent& shot) {
@@ -117,6 +119,7 @@ void loop() {
                     lowPowerMode = true;
                     nextLowPowerGpsStartMs = nowMs;  // 首个 GPS 窗口立即启动。
                     lowPowerGpsWindowActive = false;
+                    lowPowerGpsFixHoldActive = false;
                     wifiTransport.setLowPowerMode(true, nowMs);
                     Serial.println("Stillness >5s; entering low-power schedule.");
                 }
@@ -139,6 +142,7 @@ void loop() {
             gps.setEnabled(true);
             lowPowerGpsWindowActive = true;
             lowPowerGpsWindowStartMs = nowMs;
+            lowPowerGpsFixHoldActive = false;
             nextLowPowerGpsStartMs += config::LOW_POWER_GPS_CYCLE_MS;
             Serial.println("Low-power GPS window started.");
         }
@@ -146,11 +150,20 @@ void loop() {
             const GpsFix windowFix = gps.currentFix();
             const bool gotFix = windowFix.valid;
             const bool timedOut = nowMs - lowPowerGpsWindowStartMs >= config::LOW_POWER_GPS_WINDOW_MS;
-            if (gotFix || timedOut) {
+            if (gotFix && !lowPowerGpsFixHoldActive) {
+                lowPowerGpsFixHoldActive = true;
+                lowPowerGpsFixStartMs = nowMs;
+                Serial.println("Low-power GPS fix acquired; keeping GPS on for post-fix hold.");
+            }
+            const bool postFixHoldComplete = lowPowerGpsFixHoldActive &&
+                nowMs - lowPowerGpsFixStartMs >= config::LOW_POWER_GPS_POST_FIX_HOLD_MS;
+            if (postFixHoldComplete || (!lowPowerGpsFixHoldActive && timedOut)) {
                 gps.setEnabled(false);
                 lowPowerGpsWindowActive = false;
-                Serial.println(gotFix ? "Low-power GPS fix acquired; GPS off."
-                                      : "Low-power GPS timed out after 5 minutes; GPS off.");
+                lowPowerGpsFixHoldActive = false;
+                Serial.println(postFixHoldComplete
+                    ? "Low-power GPS post-fix hold complete; GPS off."
+                    : "Low-power GPS timed out after 5 minutes; GPS off.");
             }
         }
     } else {

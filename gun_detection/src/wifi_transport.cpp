@@ -62,7 +62,10 @@ void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
     if (enabled) {
         lowPowerCycleStartMs_ = nowMs;  // 进入低功耗时立即开启第一个 Wi-Fi 窗口。
         lastSpoolMs_ = nowMs;
-        Serial.println("LOW_POWER_ENTER: telemetry interval=10s, Wi-Fi window=2min/10min.");
+        Serial.printf("LOW_POWER_ENTER: telemetry interval=%lus, Wi-Fi window=%lus/%lus.\n",
+                      static_cast<unsigned long>(config::LOW_POWER_TELEMETRY_INTERVAL_MS / 1000U),
+                      static_cast<unsigned long>(config::LOW_POWER_WIFI_WINDOW_MS / 1000U),
+                      static_cast<unsigned long>(config::LOW_POWER_WIFI_CYCLE_MS / 1000U));
     } else {
         lastSpoolMs_ = nowMs - config::TELEMETRY_SPOOL_INTERVAL_MS;
         Serial.println("LOW_POWER_EXIT: returning to normal sampling and Wi-Fi.");
