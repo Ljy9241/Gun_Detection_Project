@@ -65,12 +65,16 @@ void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
     if (lowPowerMode_ == enabled) return;
     lowPowerMode_ = enabled;
     if (enabled) {
-        lowPowerCycleStartMs_ = nowMs;  // 进入低功耗时立即开启第一个 Wi-Fi 窗口。
+        lowPowerCycleStartMs_ = nowMs;  // 启用周期模式时，进入低功耗后立即开始第一个窗口。
         lastSpoolMs_ = nowMs;
-        Serial.printf("LOW_POWER_ENTER: telemetry interval=%lus, Wi-Fi window=%lus/%lus.\n",
+        Serial.printf("LOW_POWER_ENTER: telemetry interval=%lus, Wi-Fi %s",
                       static_cast<unsigned long>(config::LOW_POWER_TELEMETRY_INTERVAL_MS / 1000U),
-                      static_cast<unsigned long>(config::LOW_POWER_WIFI_WINDOW_MS / 1000U),
-                      static_cast<unsigned long>(config::LOW_POWER_WIFI_CYCLE_MS / 1000U));
+                      config::LOW_POWER_WIFI_CYCLE_ENABLED ? "cycle " : "disabled.\n");
+        if (config::LOW_POWER_WIFI_CYCLE_ENABLED) {
+            Serial.printf("window=%lus/%lus.\n",
+                          static_cast<unsigned long>(config::LOW_POWER_WIFI_WINDOW_MS / 1000U),
+                          static_cast<unsigned long>(config::LOW_POWER_WIFI_CYCLE_MS / 1000U));
+        }
     } else {
         lastSpoolMs_ = nowMs - config::TELEMETRY_SPOOL_INTERVAL_MS;
         Serial.println("LOW_POWER_EXIT: returning to normal sampling and Wi-Fi.");
@@ -124,8 +128,12 @@ void WifiTransport::update(uint32_t nowMs) {
     }
     bool radioShouldBeOn = enabled_;
     if (enabled_ && lowPowerMode_) {
-        const uint32_t phaseMs = (nowMs - lowPowerCycleStartMs_) % config::LOW_POWER_WIFI_CYCLE_MS;
-        radioShouldBeOn = phaseMs < config::LOW_POWER_WIFI_WINDOW_MS;
+        if (!config::LOW_POWER_WIFI_CYCLE_ENABLED) {
+            radioShouldBeOn = false;
+        } else {
+            const uint32_t phaseMs = (nowMs - lowPowerCycleStartMs_) % config::LOW_POWER_WIFI_CYCLE_MS;
+            radioShouldBeOn = phaseMs < config::LOW_POWER_WIFI_WINDOW_MS;
+        }
     }
     if (radioShouldBeOn != radioEnabled_) {
         if (radioShouldBeOn) {
@@ -143,7 +151,9 @@ void WifiTransport::update(uint32_t nowMs) {
             WiFi.mode(WIFI_OFF);
             radioEnabled_ = false;
             wasConnected_ = false;
-            Serial.println("Low-power Wi-Fi window ended; unacknowledged data retained.");
+            Serial.println(config::LOW_POWER_WIFI_CYCLE_ENABLED
+                               ? "Low-power Wi-Fi window ended; unacknowledged data retained."
+                               : "Low-power Wi-Fi disabled; unacknowledged data retained.");
         }
     }
     if (!enabled_ || !radioEnabled_) {

@@ -148,7 +148,8 @@ class UdpReceiver(QObject):
         """提交记录及去重凭据后再 ACK，避免设备过早删除未落盘数据。"""
         device_id = str(packet["deviceId"])
         sequence = int(packet["sequence"])
-        timestamp = packet.get("timestamp") if packet.get("timestampValid") else None
+        # timestampValid 仅表示是否已校准到日历时间；未校时的 T+... 也应保存。
+        timestamp = packet.get("timestamp") or None
         with database:
             cursor = database.execute(
                 "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
@@ -196,7 +197,8 @@ class UdpReceiver(QObject):
                     (device_id, sequence),
                 )
                 if cursor.rowcount:
-                    timestamp = record.get("timestamp") if record.get("timestampValid") else None
+                    # GPS/NTP 尚未校时也保存 T+HH:MM:SS 上电计时。
+                    timestamp = record.get("timestamp") or None
                     new_rows.append((
                         timestamp, record.get("accel_x"), record.get("accel_y"),
                         record.get("accel_z"), record.get("mic_raw"), record.get("mic_p2p"),
