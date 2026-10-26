@@ -484,21 +484,30 @@ class MonitorWindow(QMainWindow):
         self.values["altitude"].setText(f"海拔：{self.number(gps.get('altitudeM'))} m")
         self.values["speed"].setText(f"速度：{self.number(gps.get('speedKmph'))} km/h")
         self.values["satellites"].setText(f"卫星数：{gps.get('satellites', '—')}")
+        storage_used = int(storage_test.get("usedBytes", 0) or 0)
+        storage_total = int(storage_test.get("totalBytes", 0) or 0)
+        storage_capacity_text = f"已用/总共：{storage_used}/{storage_total} 字节"
         if not storage_test.get("enabled", False):
-            self.values["storage_test"].setText(
-                f"当前待上传：{storage_test.get('pendingRecords', 0)} 条\n"
-                f"运行模式：{'低功耗' if packet.get('lowPowerMode', False) else '普通'}"
-            )
+            if storage_test.get("fullSnapshot", False):
+                self.values["storage_test"].setText(
+                    f"存满快照：{storage_test.get('fullSnapshotRecords', 0)} 条\n"
+                    f"{storage_capacity_text}"
+                )
+            else:
+                self.values["storage_test"].setText(
+                    f"当前待上传：{storage_test.get('pendingRecords', 0)} 条"
+                    f"（{'低功耗' if packet.get('lowPowerMode', False) else '普通'}）\n"
+                    f"{storage_capacity_text}"
+                )
         elif storage_test.get("full", False):
             self.values["storage_test"].setText(
                 f"已存满：{storage_test.get('records', 0)} 条\n"
-                f"占用：{storage_test.get('usedBytes', 0)}/"
-                f"{storage_test.get('totalBytes', 0)} 字节"
+                f"{storage_capacity_text}"
             )
         else:
             self.values["storage_test"].setText(
-                f"当前已存入：{storage_test.get('currentRecords', 0)} 条\n"
-                "测试记录中，尚未存满"
+                f"当前已存入：{storage_test.get('currentRecords', 0)} 条（测试中）\n"
+                f"{storage_capacity_text}"
             )
         self.values["mic"].setText(
             f"raw {mic.get('raw', '—')}   P2P {mic.get('p2p', '—')}   RMS {self.number(mic.get('rms'))}"

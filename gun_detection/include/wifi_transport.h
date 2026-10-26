@@ -5,6 +5,7 @@
 #include <WiFiUdp.h>
 
 #include "shot_detector.h"
+#include "system_config.h"
 #include "telemetry_spool.h"
 
 // 定时状态包所需的传感器快照和运行统计。
@@ -64,7 +65,7 @@ public:
 
 private:
     static constexpr uint8_t QUEUE_SIZE = 16;
-    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 4;
+    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 6;
     enum class EventType : uint8_t { Shot, Voice, Vibration };
     struct QueuedEvent {
         EventType type = EventType::Shot;
@@ -89,13 +90,16 @@ private:
     uint8_t count_ = 0;
     uint32_t lastConnectAttemptMs_ = 0;
     uint32_t lastStatusMs_ = 0;
+    uint32_t lastEventSendMs_ = 0;
     uint32_t lastSpoolMs_ = 0;
     uint32_t lastSpoolRateMs_ = 0;
     uint32_t lastSpoolRateTotal_ = 0;
     uint32_t lowPowerCycleStartMs_ = 0;
     uint32_t lastRecordSendMs_ = 0;
     uint64_t inFlightSequences_[TELEMETRY_BATCH_SIZE] = {};
+    TelemetryRecord pendingFlashRecords_[config::TELEMETRY_FLASH_BATCH_RECORDS] = {};
     uint8_t inFlightCount_ = 0;
+    uint8_t pendingFlashRecordCount_ = 0;
     uint32_t lastSendErrorLogMs_ = 0;
     uint32_t sentEvents_ = 0;
     uint32_t sentStatuses_ = 0;

@@ -2,9 +2,13 @@
 
 #include <LittleFS.h>
 #include <Preferences.h>
+#include <esp_littlefs.h>
+#include <esp_partition.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include "system_config.h"
 
 #ifndef GUN_CAPACITY_TEST_BUILD_ID
 #define GUN_CAPACITY_TEST_BUILD_ID 0ULL
@@ -27,6 +31,42 @@ bool TelemetrySpool::valid(const TelemetryRecord& record) {
     return record.magic == RECORD_MAGIC && record.checksum == checksum(record);
 }
 
+uint32_t TelemetrySpool::storageUsedBytes() const {
+    if (capacityTestMode_ && capacityTestFull_) return capacityTestUsedBytes_;
+    if (storageFullSnapshotValid_) return storageFullSnapshotUsedBytes_;
+    return mounted_ ? static_cast<uint32_t>(LittleFS.usedBytes()) : capacityTestUsedBytes_;
+}
+
+uint32_t TelemetrySpool::storageTotalBytes() const {
+    if (capacityTestMode_ && capacityTestFull_) return capacityTestTotalBytes_;
+    if (storageFullSnapshotValid_) return storageFullSnapshotTotalBytes_;
+    return mounted_ ? static_cast<uint32_t>(LittleFS.totalBytes()) : capacityTestTotalBytes_;
+}
+
+void TelemetrySpool::latchStorageFullSnapshot() {
+    if (capacityTestMode_ || storageFullSnapshotValid_ || !mounted_) return;
+    storageFullSnapshotRecords_ = pendingCount();
+    storageFullSnapshotUsedBytes_ = static_cast<uint32_t>(LittleFS.usedBytes());
+    storageFullSnapshotTotalBytes_ = static_cast<uint32_t>(LittleFS.totalBytes());
+    storageFullSnapshotValid_ = true;
+    Serial.printf("Telemetry storage full snapshot: records=%llu used=%lu/%lu bytes\n",
+                  static_cast<unsigned long long>(storageFullSnapshotRecords_),
+                  static_cast<unsigned long>(storageFullSnapshotUsedBytes_),
+                  static_cast<unsigned long>(storageFullSnapshotTotalBytes_));
+}
+
+void TelemetrySpool::clearStorageFullSnapshotIfSpaceAvailable() {
+    if (capacityTestMode_ || !storageFullSnapshotValid_ || !mounted_) return;
+    const uint32_t totalBytes = static_cast<uint32_t>(LittleFS.totalBytes());
+    const uint32_t usedBytes = static_cast<uint32_t>(LittleFS.usedBytes());
+    if (totalBytes > usedBytes && totalBytes - usedBytes > LITTLEFS_WRITE_RESERVE_BYTES) {
+        storageFullSnapshotValid_ = false;
+        storageFullSnapshotRecords_ = 0;
+        storageFullSnapshotUsedBytes_ = 0;
+        storageFullSnapshotTotalBytes_ = 0;
+    }
+}
+
 void TelemetrySpool::segmentPath(uint32_t index, char* path, size_t size) {
     snprintf(path, size, "/q%08lu.bin", static_cast<unsigned long>(index));
 }
@@ -37,14 +77,41 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
         Serial.println("Telemetry spool: NVS open failed.");
         return false;
     }
+
+    const esp_partition_t* littleFsPartition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "spiffs");
+    if (littleFsPartition == nullptr) {
+        Serial.println("Telemetry spool: LittleFS partition 'spiffs' not found.");
+        return false;
+    }
+
     const bool firstInitialization = !preferences.getBool("fsinit", false);
+    const uint32_t currentFsBytes = littleFsPartition->size;
+    const uint32_t previousFsBytes = preferences.getUInt("fsbytes", 0);
+    // LittleFS can grow an existing filesystem, but it cannot shrink it in place.
+    // If the partition size changed, clear the old cache before mounting so the
+    // filesystem is created with the new partition geometry instead of asserting
+    // in lfs_fs_grow_(). The user chose to discard the pre-resize telemetry cache.
+    if (!firstInitialization && previousFsBytes != currentFsBytes) {
+        Serial.printf("LittleFS partition size changed (%lu -> %lu bytes); clearing old cache.\n",
+                      static_cast<unsigned long>(previousFsBytes),
+                      static_cast<unsigned long>(currentFsBytes));
+        const esp_err_t formatResult = esp_littlefs_format("spiffs");
+        if (formatResult != ESP_OK) {
+            Serial.printf("Telemetry spool: LittleFS resize format failed: %s.\n",
+                          esp_err_to_name(formatResult));
+            return false;
+        }
+    }
+
     mounted_ = LittleFS.begin(firstInitialization);
     if (!mounted_) {
         Serial.println("Telemetry spool: LittleFS mount failed; flash was not formatted.");
         return false;
     }
-    if (firstInitialization && preferences.putBool("fsinit", true) == 0) {
-        Serial.println("Telemetry spool: could not persist filesystem initialization marker.");
+    if ((firstInitialization && preferences.putBool("fsinit", true) == 0) ||
+        preferences.putUInt("fsbytes", currentFsBytes) != sizeof(uint32_t)) {
+        Serial.println("Telemetry spool: could not persist filesystem geometry marker.");
         return false;
     }
     acknowledgedSequence_ = preferences.getULong64("acked", 0);
@@ -147,6 +214,7 @@ bool TelemetrySpool::scan() {
     for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
         char path[20];
         segmentPath(index, path, sizeof(path));
+        if (!LittleFS.exists(path)) continue;
         File file = LittleFS.open(path, FILE_READ);
         if (!file) continue;
         anySegment = true;
@@ -182,6 +250,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
     const uint32_t usedBytes = LittleFS.usedBytes();
     if (totalBytes <= usedBytes || totalBytes - usedBytes <= LITTLEFS_WRITE_RESERVE_BYTES) {
         full_ = true;
+        latchStorageFullSnapshot();
         Serial.printf("Telemetry spool full: preserving %lu free LittleFS bytes.\n",
                       totalBytes > usedBytes ? static_cast<unsigned long>(totalBytes - usedBytes) : 0UL);
         return false;
@@ -223,6 +292,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
             foundSlot = static_cast<bool>(file);
             if (!foundSlot) {
                 full_ = true;
+                latchStorageFullSnapshot();
                 Serial.printf("Telemetry spool full: cannot create segment %lu.\n",
                               static_cast<unsigned long>(index));
                 return false;
@@ -231,6 +301,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
         }
         if (!foundSlot) {
             full_ = true;
+            latchStorageFullSnapshot();
             return false;
         }
     }
@@ -239,6 +310,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
     if (file) file.close();
     if (!written) {
         full_ = true;
+        latchStorageFullSnapshot();
         Serial.println("Telemetry spool full or write failed; retaining pending records and stopping new writes.");
         return false;
     }
@@ -252,6 +324,101 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
     ++pendingRecordCount_;
     if (capacityTestMode_) ++capacityTestCurrentRecordCount_;
     return true;
+}
+
+size_t TelemetrySpool::appendBatch(const TelemetryRecord* samples, size_t count) {
+    if (!mounted_ || full_ || capacityTestFull_ || samples == nullptr || count == 0) return 0;
+    count = min(count, static_cast<size_t>(config::TELEMETRY_FLASH_BATCH_RECORDS));
+
+    const uint32_t totalBytes = LittleFS.totalBytes();
+    const uint32_t usedBytes = LittleFS.usedBytes();
+    if (totalBytes <= usedBytes || totalBytes - usedBytes <= LITTLEFS_WRITE_RESERVE_BYTES) {
+        full_ = true;
+        latchStorageFullSnapshot();
+        Serial.printf("Telemetry spool full: preserving %lu free LittleFS bytes.\n",
+                      totalBytes > usedBytes ? static_cast<unsigned long>(totalBytes - usedBytes) : 0UL);
+        return 0;
+    }
+
+    if (nextSequence_ + count > reservedSequenceEnd_ && !reserveSequenceBlock()) {
+        full_ = true;
+        return 0;
+    }
+
+    const size_t requestedBytes = count * sizeof(TelemetryRecord);
+    char path[20];
+    uint32_t targetSegment = latestSegment_;
+    File file;
+    bool usableSegment = false;
+    if (segmentAppendable_[targetSegment]) {
+        segmentPath(targetSegment, path, sizeof(path));
+        file = LittleFS.open(path, FILE_APPEND);
+        usableSegment = static_cast<bool>(file);
+        if (file && (file.size() % sizeof(TelemetryRecord) != 0 ||
+                     file.size() + requestedBytes > SEGMENT_BYTES)) {
+            usableSegment = false;
+        }
+    }
+    if (!usableSegment) {
+        file.close();
+        file = File();
+        bool foundSlot = false;
+        for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
+            segmentPath(index, path, sizeof(path));
+            if (LittleFS.exists(path)) continue;
+            targetSegment = index;
+            latestSegment_ = max(latestSegment_, index);
+            file = LittleFS.open(path, FILE_WRITE);
+            foundSlot = static_cast<bool>(file);
+            if (!foundSlot) {
+                full_ = true;
+                latchStorageFullSnapshot();
+                Serial.printf("Telemetry spool full: cannot create segment %lu.\n",
+                              static_cast<unsigned long>(index));
+                return 0;
+            }
+            break;
+        }
+        if (!foundSlot) {
+            full_ = true;
+            latchStorageFullSnapshot();
+            return 0;
+        }
+    }
+
+    const size_t recordOffset = file.size();
+    TelemetryRecord batch[config::TELEMETRY_FLASH_BATCH_RECORDS] = {};
+    for (size_t i = 0; i < count; ++i) {
+        batch[i] = samples[i];
+        batch[i].magic = RECORD_MAGIC;
+        batch[i].sequence = nextSequence_ + i;
+        batch[i].checksum = checksum(batch[i]);
+    }
+    const size_t bytesWritten = file.write(reinterpret_cast<const uint8_t*>(batch), requestedBytes);
+    if (file) file.close();
+
+    const size_t committed = min(count, bytesWritten / sizeof(TelemetryRecord));
+    if (committed > 0) {
+        if (!segmentHasPending_[targetSegment]) {
+            segmentHeads_[targetSegment] = batch[0];
+            segmentOffsets_[targetSegment] = recordOffset;
+            segmentHasPending_[targetSegment] = true;
+        }
+        nextSequence_ += committed;
+        pendingRecordCount_ += committed;
+        if (capacityTestMode_) capacityTestCurrentRecordCount_ += committed;
+    }
+
+    segmentAppendable_[targetSegment] = bytesWritten == requestedBytes;
+    if (committed != count) {
+        Serial.printf("Telemetry spool batch short write: %lu/%lu records committed.\n",
+                      static_cast<unsigned long>(committed), static_cast<unsigned long>(count));
+        if (committed == 0) {
+            full_ = true;
+            latchStorageFullSnapshot();
+        }
+    }
+    return committed;
 }
 
 bool TelemetrySpool::findPending(TelemetryRecord& sample, uint32_t* foundSegment, size_t* foundOffset) {
@@ -381,6 +548,7 @@ bool TelemetrySpool::acknowledge(uint64_t sequence) {
         if (LittleFS.remove(path)) {
             segmentAppendable_[segment] = false;
             if (!capacityTestFull_) full_ = false;
+            clearStorageFullSnapshotIfSpaceAvailable();
         }
     }
     if (pendingRecordCount_ > 0) --pendingRecordCount_;
@@ -420,5 +588,6 @@ bool TelemetrySpool::compactAcknowledgedSegments() {
         }
     }
     if (changed) full_ = false;
+    if (changed) clearStorageFullSnapshotIfSpaceAvailable();
     return changed;
 }

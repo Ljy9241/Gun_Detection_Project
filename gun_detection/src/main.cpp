@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "adc_sampler.h"
 #include "gps_manager.h"
@@ -9,7 +11,7 @@
 #include "voice_detection.h"
 #include "wifi_transport.h"
 
-// 各功能模块由主循环协同调度，传感器模块自身不创建任务。
+// 网络与事件融合由主循环调度；高优先级 ADC 任务持续读取并处理传感器采样。
 VoiceDetection voiceDetection;
 VibrateDetection vibrateDetection;
 GpsManager gps(Serial1);
@@ -17,6 +19,8 @@ ShotDetector shotDetector;
 WifiTransport wifiTransport;
 AdcSampler adcSampler;
 AdcSample adcSamples[1024];
+portMUX_TYPE sensorStateMux = portMUX_INITIALIZER_UNLOCKED;
+bool adcReaderTaskStarted = false;
 uint16_t pendingMicSample = 0;
 uint16_t pendingAccelX = 0;
 uint16_t pendingAccelY = 0;
@@ -33,6 +37,106 @@ uint32_t lowPowerGpsWindowStartMs = 0;
 bool lowPowerGpsFixHoldActive = false;
 uint32_t lowPowerGpsFixStartMs = 0;
 uint32_t nextLowPowerGpsStartMs = 0;
+
+struct SensorSnapshot {
+    VoiceEvent voiceEvent;
+    VibrateEvent vibrationEvent;
+    uint16_t micRaw = 0;
+    uint16_t micPeakToPeak = 0;
+    float micRms = 0.0F;
+    uint16_t vibrationX = 0;
+    uint16_t vibrationY = 0;
+    uint16_t vibrationZ = 0;
+    float vibrationMagnitude = 0.0F;
+    float vibrationJerk = 0.0F;
+    float sampleDelta = 0.0F;
+    float rollDegrees = 0.0F;
+    float pitchDegrees = 0.0F;
+    uint32_t voiceDroppedSamples = 0;
+    uint32_t vibrationDroppedSamples = 0;
+    bool vibrationReady = false;
+    bool tiltValid = false;
+    bool hasVoiceEvent = false;
+    bool hasVibrationEvent = false;
+};
+
+static void processAdcSample(const AdcSample& sample) {
+    switch (sample.input) {
+        case AdcInput::Microphone:
+            // A new scan begins at the microphone; discard any incomplete
+            // previous scan rather than mixing axes from different instants.
+            pendingAdcMask = 0;
+            pendingMicSample = sample.value;
+            pendingAdcMask |= 0x01;
+            break;
+        case AdcInput::AccelX:
+            pendingAccelX = sample.value;
+            pendingAdcMask |= 0x02;
+            break;
+        case AdcInput::AccelY:
+            pendingAccelY = sample.value;
+            pendingAdcMask |= 0x04;
+            break;
+        case AdcInput::AccelZ:
+            pendingAccelZ = sample.value;
+            pendingAdcMask |= 0x08;
+            break;
+    }
+    if (pendingAdcMask == 0x0F) {
+        portENTER_CRITICAL(&sensorStateMux);
+        voiceDetection.processSample(pendingMicSample, sample.timestampUs);
+        vibrateDetection.processSample(pendingAccelX, pendingAccelY,
+                                       pendingAccelZ, sample.timestampUs);
+        portEXIT_CRITICAL(&sensorStateMux);
+        pendingAdcMask = 0;
+    }
+}
+
+static SensorSnapshot captureSensorSnapshot() {
+    SensorSnapshot snapshot;
+    portENTER_CRITICAL(&sensorStateMux);
+    snapshot.hasVoiceEvent = voiceDetection.consumeEvent(snapshot.voiceEvent);
+    snapshot.hasVibrationEvent = vibrateDetection.consumeEvent(snapshot.vibrationEvent);
+    snapshot.micRaw = voiceDetection.latestRaw();
+    snapshot.micPeakToPeak = voiceDetection.latestPeakToPeak();
+    snapshot.micRms = voiceDetection.latestRms();
+    snapshot.vibrationReady = vibrateDetection.calibrated();
+    snapshot.vibrationX = vibrateDetection.rawX();
+    snapshot.vibrationY = vibrateDetection.rawY();
+    snapshot.vibrationZ = vibrateDetection.rawZ();
+    snapshot.vibrationMagnitude = vibrateDetection.magnitude();
+    snapshot.vibrationJerk = vibrateDetection.jerk();
+    snapshot.sampleDelta = vibrateDetection.sampleDelta();
+    snapshot.tiltValid = vibrateDetection.angleValid();
+    snapshot.rollDegrees = vibrateDetection.rollDegrees();
+    snapshot.pitchDegrees = vibrateDetection.pitchDegrees();
+    snapshot.voiceDroppedSamples = voiceDetection.droppedSamples();
+    snapshot.vibrationDroppedSamples = vibrateDetection.droppedSamples();
+    portEXIT_CRITICAL(&sensorStateMux);
+    return snapshot;
+}
+
+static void adcReaderTask(void*) {
+    // The legacy ADC driver's SAR lock belongs to the task that starts it.
+    // Keep start/stop/recovery in this task to avoid cross-task mutex release.
+    if (!adcSampler.start()) {
+        vTaskDelete(nullptr);
+        return;
+    }
+    for (;;) {
+        const size_t sampleCount = adcSampler.read(adcSamples, 1024, esp_timer_get_time());
+        if (sampleCount == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+        for (size_t i = 0; i < sampleCount; ++i) {
+            processAdcSample(adcSamples[i]);
+        }
+        // Let the Arduino loop task service Wi-Fi and GPS between DMA batches.
+        // The ADC peripheral continues sampling while this task yields.
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
 
 static void printShot(const ShotEvent& shot) {
     // 输出融合事件摘要，便于不连接上位机时通过串口检查检测结果。
@@ -60,7 +164,14 @@ void setup() {
     adcSampler.begin();
     gps.begin(config::GPS_ENABLE_PIN, config::GPS_PPS_PIN, config::GPS_UART_RX_PIN,
               config::GPS_UART_TX_PIN, config::GPS_BAUD);
+    // Start Wi-Fi before launching the high-priority sampler so radio
+    // association does not depend on the ADC task yielding during startup.
     wifiTransport.begin();
+    if (adcSampler.ready()) {
+        adcReaderTaskStarted = xTaskCreatePinnedToCore(
+            adcReaderTask, "adc-reader", 4096, nullptr, 5, nullptr, 1) == pdPASS;
+        Serial.printf("ADC reader task: %s.\n", adcReaderTaskStarted ? "started" : "failed");
+    }
 
     Serial.println("MMA7361 and GPS enabled; continuous detection started.");
 }
@@ -71,45 +182,19 @@ void loop() {
     const uint32_t nowMs = millis();
 
     if (adcSampler.ready()) {
-        const size_t sampleCount = adcSampler.read(adcSamples, 1024, nowUs);
-        for (size_t i = 0; i < sampleCount; ++i) {
-            const AdcSample& sample = adcSamples[i];
-            switch (sample.input) {
-                case AdcInput::Microphone:
-                    // A new scan begins at the microphone; discard any incomplete
-                    // previous scan rather than mixing axes from different instants.
-                    pendingAdcMask = 0;
-                    pendingMicSample = sample.value;
-                    pendingAdcMask |= 0x01;
-                    break;
-                case AdcInput::AccelX:
-                    pendingAccelX = sample.value;
-                    pendingAdcMask |= 0x02;
-                    break;
-                case AdcInput::AccelY:
-                    pendingAccelY = sample.value;
-                    pendingAdcMask |= 0x04;
-                    break;
-                case AdcInput::AccelZ:
-                    pendingAccelZ = sample.value;
-                    pendingAdcMask |= 0x08;
-                    break;
-            }
-            if (pendingAdcMask == 0x0F) {
-                voiceDetection.processSample(pendingMicSample, sample.timestampUs);
-                vibrateDetection.processSample(pendingAccelX, pendingAccelY,
-                                               pendingAccelZ, sample.timestampUs);
-                pendingAdcMask = 0;
-            }
+        if (!adcReaderTaskStarted) {
+            const size_t sampleCount = adcSampler.read(adcSamples, 1024, nowUs);
+            for (size_t i = 0; i < sampleCount; ++i) processAdcSample(adcSamples[i]);
         }
     } else {
         // DMA setup failsafe: retain the previous timed one-shot sampling path.
         voiceDetection.update(nowUs);
         vibrateDetection.update(nowUs);
     }
+    const SensorSnapshot sensors = captureSensorSnapshot();
 
-    if (!config::CAPACITY_TEST_MODE && vibrateDetection.calibrated()) {
-        const bool stationary = vibrateDetection.sampleDelta() <
+    if (!config::CAPACITY_TEST_MODE && sensors.vibrationReady) {
+        const bool stationary = sensors.sampleDelta <
                                 config::LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS;
         if (!lowPowerMode) {
             if (stationary) {
@@ -171,23 +256,21 @@ void loop() {
     }
     gps.update();
 
-    VoiceEvent voiceEvent;
-    if (voiceDetection.consumeEvent(voiceEvent)) {
+    if (sensors.hasVoiceEvent) {
         ++voiceDetectionCount;
-        Serial.printf("VOICE TRIGGER p2p=%u rms=%.1f rise=%.2f\n", voiceEvent.peakToPeak,
-                      voiceEvent.rms, voiceEvent.riseRatio);
-        wifiTransport.enqueueVoiceDetection(voiceEvent, voiceDetectionCount);
-        shotDetector.onVoiceEvent(voiceEvent);
+        Serial.printf("VOICE TRIGGER p2p=%u rms=%.1f rise=%.2f\n", sensors.voiceEvent.peakToPeak,
+                      sensors.voiceEvent.rms, sensors.voiceEvent.riseRatio);
+        wifiTransport.enqueueVoiceDetection(sensors.voiceEvent, voiceDetectionCount);
+        shotDetector.onVoiceEvent(sensors.voiceEvent);
     }
 
-    VibrateEvent vibrateEvent;
-    if (vibrateDetection.consumeEvent(vibrateEvent)) {
+    if (sensors.hasVibrationEvent) {
         ++vibrationDetectionCount;
         Serial.printf("VIB TRIGGER peak=%.1f jerk=%.1f sat=%s\n",
-                      vibrateEvent.peakMagnitude, vibrateEvent.peakJerk,
-                      vibrateEvent.saturated ? "yes" : "no");
-        wifiTransport.enqueueVibrationDetection(vibrateEvent, vibrationDetectionCount);
-        shotDetector.onVibrateEvent(vibrateEvent);
+                      sensors.vibrationEvent.peakMagnitude, sensors.vibrationEvent.peakJerk,
+                      sensors.vibrationEvent.saturated ? "yes" : "no");
+        wifiTransport.enqueueVibrationDetection(sensors.vibrationEvent, vibrationDetectionCount);
+        shotDetector.onVibrateEvent(sensors.vibrationEvent);
     }
 
     shotDetector.update(nowUs);
@@ -200,18 +283,18 @@ void loop() {
 
     // 汇总最新传感器状态；WifiTransport 会在自己的周期内打包上报。
     WifiTelemetry telemetry;
-    telemetry.micRaw = voiceDetection.latestRaw();
-    telemetry.micPeakToPeak = voiceDetection.latestPeakToPeak();
-    telemetry.micRms = voiceDetection.latestRms();
-    telemetry.vibrationReady = vibrateDetection.calibrated();
-    telemetry.vibrationX = vibrateDetection.rawX();
-    telemetry.vibrationY = vibrateDetection.rawY();
-    telemetry.vibrationZ = vibrateDetection.rawZ();
-    telemetry.vibrationMagnitude = vibrateDetection.magnitude();
-    telemetry.vibrationJerk = vibrateDetection.jerk();
-    telemetry.tiltValid = vibrateDetection.angleValid();
-    telemetry.rollDegrees = vibrateDetection.rollDegrees();
-    telemetry.pitchDegrees = vibrateDetection.pitchDegrees();
+    telemetry.micRaw = sensors.micRaw;
+    telemetry.micPeakToPeak = sensors.micPeakToPeak;
+    telemetry.micRms = sensors.micRms;
+    telemetry.vibrationReady = sensors.vibrationReady;
+    telemetry.vibrationX = sensors.vibrationX;
+    telemetry.vibrationY = sensors.vibrationY;
+    telemetry.vibrationZ = sensors.vibrationZ;
+    telemetry.vibrationMagnitude = sensors.vibrationMagnitude;
+    telemetry.vibrationJerk = sensors.vibrationJerk;
+    telemetry.tiltValid = sensors.tiltValid;
+    telemetry.rollDegrees = sensors.rollDegrees;
+    telemetry.pitchDegrees = sensors.pitchDegrees;
     telemetry.voiceFlag = shotDetector.flag1();
     telemetry.vibrationFlag = shotDetector.flag2();
     telemetry.gpsValid = fix.valid;
@@ -227,8 +310,8 @@ void loop() {
     telemetry.shotCount = shotDetector.shotCount();
     telemetry.voiceDetectionCount = voiceDetectionCount;
     telemetry.vibrationDetectionCount = vibrationDetectionCount;
-    telemetry.voiceDroppedSamples = voiceDetection.droppedSamples();
-    telemetry.vibrationDroppedSamples = vibrateDetection.droppedSamples();
+    telemetry.voiceDroppedSamples = sensors.voiceDroppedSamples;
+    telemetry.vibrationDroppedSamples = sensors.vibrationDroppedSamples;
     wifiTransport.setTelemetry(telemetry);
     wifiTransport.update(nowMs);
 
@@ -238,18 +321,20 @@ void loop() {
         Serial.printf(
             "mic[raw=%u p2p=%u rms=%.1f] mma[%s x=%u y=%u z=%u mag=%.1f jerk=%.1f] "
             "flags[%d,%d] power[%s] gps[%s sats=%lu chars=%lu] wifi[%s] "
-            "adc[overrun=%lu] spool[written=%lu rate=%lu/s] "
+            "heap[free=%lu min=%lu] adc[overrun=%lu] spool[written=%lu rate=%lu/s] "
             "udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] "
             "dropped[%lu,%lu]\n",
-            voiceDetection.latestRaw(), voiceDetection.latestPeakToPeak(),
-            voiceDetection.latestRms(), vibrateDetection.calibrated() ? "ready" : "cal",
-            vibrateDetection.rawX(), vibrateDetection.rawY(), vibrateDetection.rawZ(),
-            vibrateDetection.magnitude(), vibrateDetection.jerk(), shotDetector.flag1(),
+            sensors.micRaw, sensors.micPeakToPeak,
+            sensors.micRms, sensors.vibrationReady ? "ready" : "cal",
+            sensors.vibrationX, sensors.vibrationY, sensors.vibrationZ,
+            sensors.vibrationMagnitude, sensors.vibrationJerk, shotDetector.flag1(),
             shotDetector.flag2(), lowPowerMode ? "low" : "normal", fix.valid ? "fix" : "search",
             static_cast<unsigned long>(fix.satellites),
             static_cast<unsigned long>(gps.parsedCharacters()),
             wifiTransport.connected() ? "connected" :
                 (wifiTransport.radioEnabled() ? "search" : "off"),
+            static_cast<unsigned long>(ESP.getFreeHeap()),
+            static_cast<unsigned long>(ESP.getMinFreeHeap()),
             static_cast<unsigned long>(adcSampler.overrunCount()),
             static_cast<unsigned long>(wifiTransport.telemetryWritesTotal()),
             static_cast<unsigned long>(wifiTransport.telemetryWritesPerSecond()),
@@ -258,8 +343,8 @@ void loop() {
             static_cast<unsigned long>(wifiTransport.sentStatuses()),
             static_cast<unsigned long>(wifiTransport.failedSends()),
             static_cast<unsigned long>(wifiTransport.droppedEvents()),
-            static_cast<unsigned long>(voiceDetection.droppedSamples()),
-            static_cast<unsigned long>(vibrateDetection.droppedSamples()));
+            static_cast<unsigned long>(sensors.voiceDroppedSamples),
+            static_cast<unsigned long>(sensors.vibrationDroppedSamples));
     }
 
     yield();

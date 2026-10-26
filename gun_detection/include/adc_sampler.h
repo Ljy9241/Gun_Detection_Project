@@ -20,13 +20,15 @@ struct AdcSample {
 class AdcSampler {
 public:
     bool begin();
+    bool start();
     size_t read(AdcSample* samples, size_t capacity, uint64_t newestSampleUs);
     uint32_t overrunCount() const { return overrunCount_; }
     bool ready() const { return ready_; }
 
 private:
-    bool ready_ = false;
-    uint32_t overrunCount_ = 0;
+    volatile bool ready_ = false;
+    volatile bool running_ = false;
+    volatile uint32_t overrunCount_ = 0;
     uint64_t lastSampleTimestampUs_ = 0;
     uint8_t dmaBytes_[4096] = {};
 };

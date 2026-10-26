@@ -28,7 +28,11 @@ static bool formatTimestamp(char* buffer, size_t size) {
              static_cast<unsigned long long>(hours),
              static_cast<unsigned long long>(minutes),
              static_cast<unsigned long long>(seconds));
-    return true;
+    return false;
+}
+
+static bool hasCalendarTimestamp(const char* timestamp) {
+    return timestamp != nullptr && timestamp[0] != '\0' && strncmp(timestamp, "T+", 2) != 0;
 }
 
 void WifiTransport::begin() {
@@ -40,6 +44,7 @@ void WifiTransport::begin() {
     }
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(true);
+    WiFi.setAutoReconnect(true);
     WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
     radioEnabled_ = true;
     lastConnectAttemptMs_ = millis();
@@ -90,15 +95,27 @@ void WifiTransport::update(uint32_t nowMs) {
             record.latitude = telemetry_.latitude;
             record.longitude = telemetry_.longitude;
             record.gpsValid = telemetry_.gpsValid ? 1 : 0;
-            const bool appended = spool_.append(record);
-            if (appended) {
-                ++telemetryWritesTotal_;
-            } else if (spool_.capacityTestMode() && spool_.full()) {
-                spool_.latchCapacityTestFull();
+            if (pendingFlashRecordCount_ < config::TELEMETRY_FLASH_BATCH_RECORDS) {
+                pendingFlashRecords_[pendingFlashRecordCount_++] = record;
             }
-        } else if (spool_.capacityTestMode() && !spool_.capacityTestResultSaved()) {
-            spool_.latchCapacityTestFull();
         }
+    }
+    // Batch normal-mode writes; low-power records flush immediately so they do
+    // not remain volatile for minutes between 10-second telemetry samples.
+    if (pendingFlashRecordCount_ > 0 && !spool_.full() && !spool_.capacityTestFull() &&
+        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || lowPowerMode_)) {
+        const size_t committed = spool_.appendBatch(pendingFlashRecords_, pendingFlashRecordCount_);
+        if (committed > 0) {
+            telemetryWritesTotal_ += committed;
+            pendingFlashRecordCount_ -= static_cast<uint8_t>(committed);
+            if (pendingFlashRecordCount_ > 0) {
+                memmove(pendingFlashRecords_, pendingFlashRecords_ + committed,
+                        pendingFlashRecordCount_ * sizeof(TelemetryRecord));
+            }
+        }
+    }
+    if (spool_.full() && spool_.capacityTestMode() && !spool_.capacityTestResultSaved()) {
+        spool_.latchCapacityTestFull();
     }
     if (nowMs - lastSpoolRateMs_ >= 1000) {
         lastSpoolRateMs_ = nowMs;
@@ -158,7 +175,8 @@ void WifiTransport::update(uint32_t nowMs) {
     if (!isConnected) {
         if (nowMs - lastConnectAttemptMs_ >= config::WIFI_RECONNECT_INTERVAL_MS) {
             lastConnectAttemptMs_ = nowMs;
-            WiFi.disconnect();
+            // Let the driver's first association/retry finish. Calling
+            // disconnect() here resets an in-progress connection attempt.
             WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
         }
         return;
@@ -171,20 +189,34 @@ void WifiTransport::update(uint32_t nowMs) {
 
     receiveAcknowledgements();
     const bool capacityTestUploadEnabled = !spool_.capacityTestMode() || spool_.capacityTestFull();
-    if (capacityTestUploadEnabled && (!recordInFlight_ || nowMs - lastRecordSendMs_ >= 500)) {
+    if (capacityTestUploadEnabled &&
+        (!recordInFlight_ || nowMs - lastRecordSendMs_ >= config::UDP_TELEMETRY_RETRY_INTERVAL_MS)) {
         TelemetryRecord records[TELEMETRY_BATCH_SIZE];
         const size_t count = spool_.peekBatch(records, TELEMETRY_BATCH_SIZE);
-        if (count > 0 && sendTelemetryBatch(records, count)) {
-            inFlightCount_ = static_cast<uint8_t>(count);
-            for (size_t i = 0; i < count; ++i) inFlightSequences_[i] = records[i].sequence;
-            recordInFlight_ = true;
+        if (count > 0) {
             lastRecordSendMs_ = nowMs;
+            if (sendTelemetryBatch(records, count)) {
+                inFlightCount_ = static_cast<uint8_t>(count);
+                for (size_t i = 0; i < count; ++i) inFlightSequences_[i] = records[i].sequence;
+                recordInFlight_ = true;
+            } else {
+                ++failedSends_;
+                if (nowMs - lastSendErrorLogMs_ >= 1000) {
+                    lastSendErrorLogMs_ = nowMs;
+                    Serial.printf("UDP telemetry batch send failed: records=%u target=%s:%u\n",
+                                  static_cast<unsigned>(count), config::UPPER_COMPUTER_HOST,
+                                  config::UPPER_COMPUTER_PORT);
+                }
+            }
         }
     }
 
-    if (count_ > 0 && send(queue_[tail_])) {
-        tail_ = (tail_ + 1) % QUEUE_SIZE;
-        --count_;
+    if (count_ > 0 && nowMs - lastEventSendMs_ >= config::UDP_EVENT_RETRY_INTERVAL_MS) {
+        lastEventSendMs_ = nowMs;
+        if (send(queue_[tail_])) {
+            tail_ = (tail_ + 1) % QUEUE_SIZE;
+            --count_;
+        }
     }
 
     if (nowMs - lastStatusMs_ >= config::UDP_STATUS_INTERVAL_MS) {
@@ -199,7 +231,7 @@ void WifiTransport::update(uint32_t nowMs) {
 }
 
 bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t count) {
-    // Four records keep JSON datagrams comfortably below the common Ethernet MTU.
+    // Six records keep datagrams compact while reducing ACK round trips.
     char payload[1600];
     int length = snprintf(payload, sizeof(payload),
                           "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"records\":[",
@@ -224,7 +256,8 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
             "\"mic_raw\":%u,\"mic_p2p\":%u,\"mic_rms\":%.3f,"
             "\"latitude\":%s,\"longitude\":%s}",
             i ? "," : "", static_cast<unsigned long long>(record.sequence), record.timestamp,
-            record.timestamp[0] ? "true" : "false", record.accelX, record.accelY, record.accelZ,
+            hasCalendarTimestamp(record.timestamp) ? "true" : "false",
+            record.accelX, record.accelY, record.accelZ,
             record.micRaw, record.micP2p, record.micRms, latitude, longitude);
         if (written <= 0 || static_cast<size_t>(written) >= sizeof(payload) - static_cast<size_t>(length)) {
             return false;
@@ -309,7 +342,8 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"failedChecksums\":%lu},"
         "\"storageTest\":{\"enabled\":%s,\"full\":%s,\"records\":%llu,"
         "\"currentRecords\":%llu,\"pendingRecords\":%llu,"
-        "\"usedBytes\":%lu,\"totalBytes\":%lu},"
+        "\"usedBytes\":%lu,\"totalBytes\":%lu,"
+        "\"fullSnapshot\":%s,\"fullSnapshotRecords\":%llu},"
         "\"sampleDrops\":{\"voice\":%lu,\"vibration\":%lu}}\r\n",
         config::DEVICE_ID, timestamp, timestampValid ? "true" : "false",
         static_cast<unsigned long>(nowMs), lowPowerMode_ ? "true" : "false", localIp.c_str(),
@@ -340,8 +374,10 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         static_cast<unsigned long long>(spool_.capacityTestRecordCount()),
         static_cast<unsigned long long>(spool_.capacityTestCurrentRecordCount()),
         static_cast<unsigned long long>(spool_.pendingCount()),
-        static_cast<unsigned long>(spool_.capacityTestUsedBytes()),
-        static_cast<unsigned long>(spool_.capacityTestTotalBytes()),
+        static_cast<unsigned long>(spool_.storageUsedBytes()),
+        static_cast<unsigned long>(spool_.storageTotalBytes()),
+        spool_.storageFullSnapshotValid() ? "true" : "false",
+        static_cast<unsigned long long>(spool_.storageFullSnapshotRecords()),
         static_cast<unsigned long>(telemetry_.voiceDroppedSamples),
         static_cast<unsigned long>(telemetry_.vibrationDroppedSamples));
 
@@ -422,7 +458,7 @@ bool WifiTransport::send(const QueuedEvent& event) {
             "\"accelJerk\":%.1f,\"accelSaturated\":%s,\"gpsValid\":%s,"
             "\"latitude\":%.7f,\"longitude\":%.7f,\"altitudeM\":%.1f,"
             "\"speedKmph\":%.1f,\"hdop\":%.1f,\"satellites\":%lu,\"gpsAgeMs\":%lu}\r\n",
-            config::DEVICE_ID, event.timestamp, event.timestamp[0] ? "true" : "false",
+            config::DEVICE_ID, event.timestamp, hasCalendarTimestamp(event.timestamp) ? "true" : "false",
             static_cast<unsigned long>(shot.shotId), static_cast<unsigned long>(shot.shotCount),
             static_cast<unsigned long long>(shot.timestampUs), shot.voice.peakToPeak,
             shot.voice.rms, shot.voice.riseRatio, shot.vibration.rawX, shot.vibration.rawY,
@@ -436,7 +472,7 @@ bool WifiTransport::send(const QueuedEvent& event) {
             "{\"type\":\"detection\",\"detectionType\":\"voice\",\"deviceId\":\"%s\","
             "\"timestamp\":\"%s\",\"timestampValid\":%s,\"detectionCount\":%lu,"
             "\"uptimeUs\":%llu,\"peakToPeak\":%u,\"rms\":%.1f,\"riseRatio\":%.2f}\r\n",
-            config::DEVICE_ID, event.timestamp, event.timestamp[0] ? "true" : "false",
+            config::DEVICE_ID, event.timestamp, hasCalendarTimestamp(event.timestamp) ? "true" : "false",
             static_cast<unsigned long>(event.detectionCount),
             static_cast<unsigned long long>(event.voice.timestampUs), event.voice.peakToPeak,
             event.voice.rms, event.voice.riseRatio);
@@ -446,7 +482,7 @@ bool WifiTransport::send(const QueuedEvent& event) {
             "\"timestamp\":\"%s\",\"timestampValid\":%s,\"detectionCount\":%lu,"
             "\"uptimeUs\":%llu,\"x\":%u,\"y\":%u,\"z\":%u,"
             "\"peakMagnitude\":%.1f,\"peakJerk\":%.1f,\"saturated\":%s}\r\n",
-            config::DEVICE_ID, event.timestamp, event.timestamp[0] ? "true" : "false",
+            config::DEVICE_ID, event.timestamp, hasCalendarTimestamp(event.timestamp) ? "true" : "false",
             static_cast<unsigned long>(event.detectionCount),
             static_cast<unsigned long long>(event.vibration.timestampUs), event.vibration.rawX,
             event.vibration.rawY, event.vibration.rawZ, event.vibration.peakMagnitude,

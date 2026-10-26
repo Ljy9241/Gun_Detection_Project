@@ -24,6 +24,7 @@ class TelemetrySpool {
 public:
     bool begin(bool capacityTestMode = false);
     bool append(const TelemetryRecord& sample);
+    size_t appendBatch(const TelemetryRecord* samples, size_t count);
     bool peek(TelemetryRecord& sample);
     size_t peekBatch(TelemetryRecord* records, size_t capacity);
     bool acknowledge(uint64_t sequence);
@@ -36,6 +37,10 @@ public:
     uint64_t capacityTestRecordCount() const { return capacityTestRecordCount_; }
     uint32_t capacityTestUsedBytes() const { return capacityTestUsedBytes_; }
     uint32_t capacityTestTotalBytes() const { return capacityTestTotalBytes_; }
+    uint32_t storageUsedBytes() const;
+    uint32_t storageTotalBytes() const;
+    bool storageFullSnapshotValid() const { return storageFullSnapshotValid_; }
+    uint64_t storageFullSnapshotRecords() const { return storageFullSnapshotRecords_; }
     bool full() const { return full_; }
     uint64_t lastSequence() const { return nextSequence_ ? nextSequence_ - 1 : 0; }
 
@@ -43,13 +48,16 @@ private:
     static constexpr size_t SEGMENT_BYTES = 32768;
     static constexpr uint32_t LITTLEFS_WRITE_RESERVE_BYTES = 8192;
     static constexpr uint32_t RECORD_MAGIC = 0x544C4D31;
-    static constexpr uint32_t SEGMENT_LIMIT = 256;
+    // 512 x 32 KiB segments can address 16 MiB of queued telemetry files.
+    static constexpr uint32_t SEGMENT_LIMIT = 512;
     static uint32_t checksum(const TelemetryRecord& record);
     static bool valid(const TelemetryRecord& record);
     static void segmentPath(uint32_t index, char* path, size_t size);
     bool scan();
     bool reserveSequenceBlock();
     bool compactAcknowledgedSegments();
+    void latchStorageFullSnapshot();
+    void clearStorageFullSnapshotIfSpaceAvailable();
     bool findPending(TelemetryRecord& sample, uint32_t* segment, size_t* offset);
     void advanceSegment(uint32_t segment);
 
@@ -63,6 +71,9 @@ private:
     uint64_t pendingRecordCount_ = 0;
     uint32_t capacityTestUsedBytes_ = 0;
     uint32_t capacityTestTotalBytes_ = 0;
+    uint64_t storageFullSnapshotRecords_ = 0;
+    uint32_t storageFullSnapshotUsedBytes_ = 0;
+    uint32_t storageFullSnapshotTotalBytes_ = 0;
     TelemetryRecord segmentHeads_[SEGMENT_LIMIT] = {};
     size_t segmentOffsets_[SEGMENT_LIMIT] = {};
     bool segmentHasPending_[SEGMENT_LIMIT] = {};
@@ -72,4 +83,5 @@ private:
     bool capacityTestMode_ = false;
     bool capacityTestFull_ = false;
     bool capacityTestResultSaved_ = false;
+    bool storageFullSnapshotValid_ = false;
 };

@@ -85,28 +85,44 @@ bool AdcSampler::begin() {
         return false;
     }
 
-    error = adc_digi_start();
+    ready_ = true;
+    return true;
+}
+
+bool AdcSampler::start() {
+    if (!ready_) return false;
+    if (running_) return true;
+    const esp_err_t error = adc_digi_start();
     if (error != ESP_OK) {
         Serial.printf("ADC DMA: start failed (%s).\n", esp_err_to_name(error));
-        adc_digi_deinitialize();
+        ready_ = false;
         return false;
     }
-    ready_ = true;
+    running_ = true;
     Serial.printf("ADC DMA ready: %lu conversions/s, 1 kHz per input.\n",
                   static_cast<unsigned long>(ADC_CONVERSION_RATE_HZ));
     return true;
 }
 
 size_t AdcSampler::read(AdcSample* samples, size_t capacity, uint64_t newestSampleUs) {
-    if (!ready_ || samples == nullptr || capacity == 0) return 0;
+    if (!ready_ || !running_ || samples == nullptr || capacity == 0) return 0;
 
     uint32_t bytesRead = 0;
     const esp_err_t error = adc_digi_read_bytes(dmaBytes_, sizeof(dmaBytes_), &bytesRead, 0);
     if (error == ESP_ERR_INVALID_STATE) {
         ++overrunCount_;
         lastSampleTimestampUs_ = 0;
-        adc_digi_stop();
-        if (adc_digi_start() != ESP_OK) ready_ = false;
+        // The legacy IDF ADC lock is task-owned: start, stop and restart must
+        // all run in the same task. read() is called only by adcReaderTask.
+        const esp_err_t stopError = adc_digi_stop();
+        if (stopError != ESP_OK) {
+            Serial.printf("ADC DMA: overrun stop failed (%s).\n", esp_err_to_name(stopError));
+            ready_ = false;
+            running_ = false;
+            return 0;
+        }
+        running_ = false;
+        if (!start()) return 0;
         return 0;
     }
     if (error != ESP_OK || bytesRead < ADC_CONVERSION_BYTES) return 0;
