@@ -12,9 +12,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pyqtgraph as pg
-import trajectory_store
-from trajectory_map import TrajectoryMap
-from transfer_control import TransferControl, decode_records
+from monitor_lib import trajectory_store
+from monitor_lib.trajectory_map import TrajectoryMap
+from monitor_lib.transfer_control import TransferControl, decode_records
 from PyQt5.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,

@@ -1,10 +1,14 @@
 import json
 import unittest
+import sys
+from pathlib import Path
 
-from transfer_control import TransferControl, FIELDS, decode_records
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from monitor_lib.transfer_control import TransferControl, FIELDS, decode_records
 from test_trajectory import database, record, Socket
 from gun_wifi_monitor import UdpReceiver
-import trajectory_store
+from monitor_lib import trajectory_store
 
 
 class TransferTests(unittest.TestCase):

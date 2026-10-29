@@ -8,7 +8,7 @@ from pathlib import Path
 from PyQt5.QtCore import QObject, QUrl, pyqtSignal, pyqtSlot
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton
 
-import trajectory_store
+from . import trajectory_store
 
 try:
     from PyQt5.QtWebChannel import QWebChannel
@@ -75,15 +75,17 @@ class TrajectoryMap(QWidget):
 
     def load(self):
         folder = Path(__file__).resolve().parent
+        monitor_folder = folder.parent
+        template_path = folder / 'assets' / 'trajectory_map.html'
         try:
-            config = json.loads((folder / 'amap_config.json').read_text(encoding='utf-8-sig'))
+            config = json.loads((monitor_folder / 'amap_config.json').read_text(encoding='utf-8-sig'))
             if not isinstance(config.get('key'), str) or not config['key'].strip():
                 raise ValueError('缺少 key')
             if not isinstance(config.get('securityJsCode'), str) or not config['securityJsCode'].strip():
                 raise ValueError('缺少 securityJsCode')
-            template = (folder / 'trajectory_map.html').read_text(encoding='utf-8')
+            template = template_path.read_text(encoding='utf-8')
             settings = json.dumps({k: config[k] for k in ('key', 'securityJsCode')}).replace('<', '\\u003c')
-            self.view.setHtml(template.replace('__AMAP_CONFIG__', settings), QUrl.fromLocalFile(str(folder / 'trajectory_map.html')))
+            self.view.setHtml(template.replace('__AMAP_CONFIG__', settings), QUrl.fromLocalFile(str(template_path)))
             self.error_label.hide()
         except (OSError, ValueError, TypeError):
             self.error_label.setText('地图配置读取失败。请检查 data_monitor/amap_config.json 的 key 和 securityJsCode。')

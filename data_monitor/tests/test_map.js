@@ -24,7 +24,7 @@ const context=vm.createContext({document,window:{addEventListener(){}},qt:{webCh
   QWebChannel:function(){},AMap:{Map:MapMock,Marker:Overlay,Polyline:Overlay,
   Pixel:class{},InfoWindow:class{setContent(p){this.content=p}open(){}close(){}}},
   setTimeout(){},setInterval(){},requestAnimationFrame(){},performance:{now:()=>0},console});
-let html=fs.readFileSync(__dirname+'/trajectory_map.html','utf8');
+let html=fs.readFileSync(__dirname+'/../monitor_lib/assets/trajectory_map.html','utf8');
 const script=html.split('<script>')[1].split('</script>')[0].replace('__AMAP_CONFIG__','{"key":"test","securityJsCode":"test"}');
 vm.runInContext(script,context);
 function run(code){return vm.runInContext(code,context)}

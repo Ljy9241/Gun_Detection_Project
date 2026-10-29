@@ -26,6 +26,26 @@ python -m pip install PyQt5 PyQtWebEngine pyqtgraph
 仍保留 SQLite FULL 同步、提交成功才确认、补传去重机制；电脑端兼容旧版字典格式数据包。
 新固件应配合更新后的电脑端使用。实际上传速度取决于 Wi-Fi、Flash 和电脑磁盘，应以界面测得的条/秒为准。
 
+## 目录结构
+
+```text
+data_monitor/
+├─ gun_wifi_monitor.py      # 启动入口，位置保持不变
+├─ amap_config.json         # 高德密钥配置
+├─ gun_telemetry.db         # 遥测与历史轨迹数据库
+├─ README.md                # 使用说明
+├─ monitor_lib/             # 内部功能模块
+│  ├─ trajectory_map.py     # 地图界面
+│  ├─ trajectory_store.py   # 轨迹存储
+│  ├─ transfer_control.py   # 传输控制与数据包解析
+│  └─ assets/
+│     └─ trajectory_map.html
+└─ tests/                   # 数据、传输与地图测试
+```
+
+`gun_telemetry.db-wal`、`gun_telemetry.db-shm` 是 SQLite 工作时生成的辅助文件，
+`__pycache__` 是 Python 自动生成的缓存。启动入口、密钥和数据库仍在原位置。
+
 ## 操作
 
 - 顶部下拉框选择每次上电的历史轨迹；“返回当前轨迹”恢复自动选择正在连接的设备。
@@ -58,9 +78,9 @@ python -m pip install PyQt5 PyQtWebEngine pyqtgraph
 ## 验证
 
 ```powershell
-python data_monitor/test_trajectory.py
-node data_monitor/test_map.js
-python data_monitor/test_trajectory.py --smoke
+python data_monitor/tests/test_trajectory.py
+node data_monitor/tests/test_map.js
+python data_monitor/tests/test_trajectory.py --smoke
 ```
 
 前两项验证数据库补传与地图交互；`--smoke` 在 Windows 后台创建临时数据库，使用本地配置实际加载高德地图。
