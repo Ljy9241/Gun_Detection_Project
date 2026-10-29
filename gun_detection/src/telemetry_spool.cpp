@@ -507,6 +507,12 @@ size_t TelemetrySpool::peekBatch(TelemetryRecord* records, size_t capacity) {
     size_t offset = 0;
     TelemetryRecord first;
     if (!findPending(first, &segment, &offset)) return 0;
+    uint64_t nextOtherSequence = UINT64_MAX;
+    for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
+        if (index != segment && segmentHasPending_[index]) {
+            nextOtherSequence = min(nextOtherSequence, segmentHeads_[index].sequence);
+        }
+    }
 
     char path[20];
     segmentPath(segment, path, sizeof(path));
@@ -520,6 +526,7 @@ size_t TelemetrySpool::peekBatch(TelemetryRecord* records, size_t capacity) {
     TelemetryRecord record;
     while (count < capacity && readRecord(file, record)) {
         if (!valid(record) || record.sequence <= acknowledgedSequence_) break;
+        if (record.sequence >= nextOtherSequence) break;
         records[count++] = record;
     }
     file.close();
@@ -579,6 +586,28 @@ bool TelemetrySpool::acknowledge(uint64_t sequence) {
         }
     }
     if (pendingRecordCount_ > 0) --pendingRecordCount_;
+    return true;
+}
+
+bool TelemetrySpool::acknowledgeBatch(const uint64_t* sequences, size_t count) {
+    if (!sequences || !count || count > config::TELEMETRY_FLASH_BATCH_RECORDS) return false;
+    TelemetryRecord records[config::TELEMETRY_FLASH_BATCH_RECORDS];
+    if (peekBatch(records, count) != count) return false;
+    for (size_t i = 0; i < count; ++i) {
+        if (records[i].sequence != sequences[i]) return false;
+    }
+    uint32_t segment = 0;
+    TelemetryRecord first;
+    if (!findPending(first, &segment, nullptr)) return false;
+    // peekBatch is confined to one segment. Skip its acknowledged prefix in RAM,
+    // then reuse the existing durable watermark/reclamation path once per batch.
+    segmentHeads_[segment] = records[count - 1];
+    segmentOffsets_[segment] += (count - 1) * segmentRecordBytes_[segment];
+    if (!acknowledge(sequences[count - 1])) {
+        scan();
+        return false;
+    }
+    pendingRecordCount_ -= count - 1;
     return true;
 }
 

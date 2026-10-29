@@ -159,3 +159,10 @@ size_t AdcSampler::read(AdcSample* samples, size_t capacity, uint64_t newestSamp
     }
     return outputCount;
 }
+
+void AdcSampler::stop() {
+    if (running_ && adc_digi_stop() == ESP_OK) {
+        running_ = false;
+        lastSampleTimestampUs_ = 0;
+    }
+}

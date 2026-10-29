@@ -52,6 +52,7 @@ public:
     bool enqueueVoiceDetection(const VoiceEvent& event, uint32_t detectionCount);
     bool enqueueVibrationDetection(const VibrateEvent& event, uint32_t detectionCount);
 
+    bool uploadOnly() const { return uploadOnly_; }
     bool enabled() const { return enabled_; }
     bool radioEnabled() const { return radioEnabled_; }
     bool connected() const { return WiFi.status() == WL_CONNECTED; }
@@ -65,7 +66,7 @@ public:
 
 private:
     static constexpr uint8_t QUEUE_SIZE = 16;
-    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 3;
+    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 7;
     enum class EventType : uint8_t { Shot, Voice, Vibration };
     struct QueuedEvent {
         EventType type = EventType::Shot;
@@ -114,6 +115,9 @@ private:
     float windowMicRms_ = 0.0F;
     float windowVibrationMagnitude_ = 0.0F;
     float windowVibrationJerk_ = 0.0F;
+    bool uploadOnly_ = false;
+    uint64_t controlId_ = 0;
+    uint64_t uploadTotal_ = 0;
     bool enabled_ = false;
     bool lowPowerMode_ = false;
     bool radioEnabled_ = false;

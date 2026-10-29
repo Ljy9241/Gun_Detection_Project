@@ -28,6 +28,7 @@ public:
     bool flag1() const { return voiceValid_; }
     bool flag2() const { return vibrationValid_; }
     uint32_t shotCount() const { return shotCount_; }
+    void clearPending() { voiceValid_ = false; vibrationValid_ = false; shotPending_ = false; }
 
 private:
     // 仅当两种事件时间接近且冷却时间已过时，生成待消费事件。

@@ -60,6 +60,8 @@ def coordinates(latitude, longitude, valid=True):
 
 
 def store(database, packet, record=None):
+    if packet.get('type') == 'status' and packet.get('uploadOnly'):
+        return
     record = packet if record is None else record
     device = str(packet.get('deviceId', '未知设备'))
     boot = boot_id(record)
@@ -97,7 +99,7 @@ def store(database, packet, record=None):
 def sessions(database):
     rows = database.execute("""SELECT s.device,s.boot,s.first_seen,s.live_seen,
         (SELECT timestamp FROM track_points p WHERE p.device=s.device AND p.boot=s.boot
-            WHERE p.valid=1 ORDER BY p.uptime_ms LIMIT 1),
+            AND p.valid=1 ORDER BY p.uptime_ms LIMIT 1),
         (SELECT uptime_ms FROM track_points p WHERE p.device=s.device AND p.boot=s.boot
             AND p.valid=1 ORDER BY p.uptime_ms LIMIT 1)
         FROM track_sessions s WHERE EXISTS (

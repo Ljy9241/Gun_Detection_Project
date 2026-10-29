@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <atomic>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -21,6 +22,8 @@ AdcSampler adcSampler;
 AdcSample adcSamples[1024];
 portMUX_TYPE sensorStateMux = portMUX_INITIALIZER_UNLOCKED;
 bool adcReaderTaskStarted = false;
+std::atomic<bool> pauseSampling{false};
+std::atomic<bool> samplingPaused{false};
 uint16_t pendingMicSample = 0;
 uint16_t pendingAccelX = 0;
 uint16_t pendingAccelY = 0;
@@ -124,6 +127,20 @@ static void adcReaderTask(void*) {
         return;
     }
     for (;;) {
+        if (pauseSampling.load()) {
+            adcSampler.stop();
+            samplingPaused.store(true);
+            while (pauseSampling.load()) vTaskDelay(pdMS_TO_TICKS(5));
+            portENTER_CRITICAL(&sensorStateMux);
+            voiceDetection = VoiceDetection{};
+            vibrateDetection = VibrateDetection{};
+            portEXIT_CRITICAL(&sensorStateMux);
+            voiceDetection.begin(config::MIC_ADC_PIN);
+            vibrateDetection.begin(config::MMA_X_PIN, config::MMA_Y_PIN, config::MMA_Z_PIN, config::MMA_SLEEP_PIN);
+            pendingAdcMask = 0;
+            adcSampler.start();
+            samplingPaused.store(false);
+        }
         const size_t sampleCount = adcSampler.read(adcSamples, 1024, esp_timer_get_time());
         if (sampleCount == 0) {
             vTaskDelay(pdMS_TO_TICKS(1));
@@ -180,6 +197,28 @@ void loop() {
     // 统一使用微秒时钟驱动传感器采样和事件融合，毫秒时钟用于联网周期任务。
     const uint64_t nowUs = esp_timer_get_time();
     const uint32_t nowMs = millis();
+    if (wifiTransport.uploadOnly()) {
+        wifiTransport.update(nowMs);
+        pauseSampling.store(true);
+        shotDetector.clearPending();
+        gps.setEnabled(false);
+        lowPowerMode = false;
+        stationarySinceUs = 0;
+        lowPowerGpsWindowActive = false;
+        lowPowerGpsFixHoldActive = false;
+        delay(1);
+        return;
+    }
+    if (pauseSampling.exchange(false)) {
+        gps.setEnabled(true);
+        if (!adcReaderTaskStarted) {
+            voiceDetection = VoiceDetection{};
+            vibrateDetection = VibrateDetection{};
+            voiceDetection.begin(config::MIC_ADC_PIN);
+            vibrateDetection.begin(config::MMA_X_PIN, config::MMA_Y_PIN, config::MMA_Z_PIN, config::MMA_SLEEP_PIN);
+        }
+    }
+    if (samplingPaused.load()) { delay(1); return; }
 
     if (adcSampler.ready()) {
         if (!adcReaderTaskStarted) {
@@ -314,6 +353,7 @@ void loop() {
     telemetry.vibrationDroppedSamples = sensors.vibrationDroppedSamples;
     wifiTransport.setTelemetry(telemetry);
     wifiTransport.update(nowMs);
+
 
     // 定期输出健康状态和丢样/发送计数，便于现场排查。
     if (nowMs - lastDiagnosticMs >= config::DIAGNOSTIC_INTERVAL_MS) {

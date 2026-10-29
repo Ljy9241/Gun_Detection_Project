@@ -46,7 +46,7 @@ void WifiTransport::begin() {
         return;
     }
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(true);
+    WiFi.setSleep(!uploadOnly_);
     WiFi.setAutoReconnect(true);
     WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
     radioEnabled_ = true;
@@ -88,7 +88,7 @@ void WifiTransport::update(uint32_t nowMs) {
     const uint32_t spoolIntervalMs = lowPowerMode_
         ? config::LOW_POWER_TELEMETRY_INTERVAL_MS
         : config::TELEMETRY_SPOOL_INTERVAL_MS;
-    if (nowMs - lastSpoolMs_ >= spoolIntervalMs) {
+    if (!uploadOnly_ && nowMs - lastSpoolMs_ >= spoolIntervalMs) {
         lastSpoolMs_ = nowMs;
         if (!spool_.capacityTestFull()) {
             TelemetryRecord record;
@@ -112,7 +112,7 @@ void WifiTransport::update(uint32_t nowMs) {
     // Batch normal-mode writes; low-power records flush immediately so they do
     // not remain volatile for minutes between 10-second telemetry samples.
     if (pendingFlashRecordCount_ > 0 && !spool_.full() && !spool_.capacityTestFull() &&
-        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || lowPowerMode_)) {
+        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || lowPowerMode_ || uploadOnly_)) {
         const size_t committed = spool_.appendBatch(pendingFlashRecords_, pendingFlashRecordCount_);
         if (committed > 0) {
             telemetryWritesTotal_ += committed;
@@ -132,7 +132,7 @@ void WifiTransport::update(uint32_t nowMs) {
         lastSpoolRateTotal_ = telemetryWritesTotal_;
     }
     bool radioShouldBeOn = enabled_;
-    if (enabled_ && lowPowerMode_) {
+    if (enabled_ && lowPowerMode_ && !uploadOnly_) {
         if (!config::LOW_POWER_WIFI_CYCLE_ENABLED) {
             radioShouldBeOn = false;
         } else {
@@ -143,7 +143,7 @@ void WifiTransport::update(uint32_t nowMs) {
     if (radioShouldBeOn != radioEnabled_) {
         if (radioShouldBeOn) {
             WiFi.mode(WIFI_STA);
-            WiFi.setSleep(true);
+            WiFi.setSleep(!uploadOnly_);
             WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
             lastConnectAttemptMs_ = nowMs;
             radioEnabled_ = true;
@@ -203,7 +203,7 @@ void WifiTransport::update(uint32_t nowMs) {
     }
 
     receiveAcknowledgements();
-    const bool capacityTestUploadEnabled = !spool_.capacityTestMode() || spool_.capacityTestFull();
+    const bool capacityTestUploadEnabled = uploadOnly_ || !spool_.capacityTestMode() || spool_.capacityTestFull();
     if (capacityTestUploadEnabled &&
         (!recordInFlight_ || nowMs - lastRecordSendMs_ >= config::UDP_TELEMETRY_RETRY_INTERVAL_MS)) {
         TelemetryRecord records[TELEMETRY_BATCH_SIZE];
@@ -234,7 +234,7 @@ void WifiTransport::update(uint32_t nowMs) {
         }
     }
 
-    if (nowMs - lastStatusMs_ >= config::UDP_STATUS_INTERVAL_MS) {
+    if (nowMs - lastStatusMs_ >= (uploadOnly_ ? 1000U : config::UDP_STATUS_INTERVAL_MS)) {
         lastStatusMs_ = nowMs;
         if (sendStatus(nowMs)) {
             windowMicPeakToPeak_ = 0;
@@ -246,10 +246,10 @@ void WifiTransport::update(uint32_t nowMs) {
 }
 
 bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t count) {
-    // Three extended records keep datagrams below the usual Ethernet MTU.
-    char payload[1600];
+    // Compact rows amortize durable PC commits over seven records.
+    char payload[1472];
     int length = snprintf(payload, sizeof(payload),
-                          "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"records\":[",
+                          "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"format\":\"compact-v1\",\"records\":[",
                           config::DEVICE_ID);
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(payload)) return false;
 
@@ -266,13 +266,8 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
         }
         const int written = snprintf(
             payload + length, sizeof(payload) - static_cast<size_t>(length),
-            "%s{\"sequence\":%llu,\"timestamp\":\"%s\",\"timestampValid\":%s,"
-            "\"accel_x\":%u,\"accel_y\":%u,\"accel_z\":%u,"
-            "\"mic_raw\":%u,\"mic_p2p\":%u,\"mic_rms\":%.3f,"
-            "\"latitude\":%s,\"longitude\":%s,\"bootId\":\"%016llx\","
-            "\"uptimeMs\":%llu,\"shotId\":%lu}",
+            "%s[%llu,\"%s\",%u,%u,%u,%u,%u,%.3f,%s,%s,\"%016llx\",%llu,%lu]",
             i ? "," : "", static_cast<unsigned long long>(record.sequence), record.timestamp,
-            hasCalendarTimestamp(record.timestamp) ? "true" : "false",
             record.accelX, record.accelY, record.accelZ,
             record.micRaw, record.micP2p, record.micRms, latitude, longitude,
             static_cast<unsigned long long>(record.bootId),
@@ -294,10 +289,33 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
 
 void WifiTransport::receiveAcknowledgements() {
     while (udp_.parsePacket() > 0) {
-        char payload[256] = {};
+        char payload[512] = {};
         const int length = udp_.read(reinterpret_cast<uint8_t*>(payload), sizeof(payload) - 1);
         if (length <= 0) continue;
         payload[length] = '\0';
+        char prefix[160];
+        snprintf(prefix, sizeof(prefix),
+                 "{\"type\":\"set_mode\",\"deviceId\":\"%s\",\"bootId\":\"%016llx\",\"requestId\":",
+                 config::DEVICE_ID, static_cast<unsigned long long>(bootId_));
+        if (strncmp(payload, prefix, strlen(prefix)) == 0) {
+            char* end = nullptr;
+            const uint64_t id = strtoull(payload + strlen(prefix), &end, 10);
+            const bool on = strcmp(end, ",\"uploadOnly\":true}") == 0;
+            const bool off = strcmp(end, ",\"uploadOnly\":false}") == 0;
+            if (id && id >= controlId_ && (on || off)) {
+                if (id > controlId_) {
+                    controlId_ = id;
+                    if (on && !uploadOnly_) uploadTotal_ = spool_.pendingCount() + pendingFlashRecordCount_;
+                    uploadOnly_ = on;
+                    lowPowerMode_ = false;
+                    WiFi.setSleep(!uploadOnly_);
+                    lastSpoolMs_ = millis();
+                }
+                sendStatus(millis());
+            }
+            continue;
+        }
+
         if (!recordInFlight_ || !strstr(payload, "\"type\":\"ack_batch\"") ||
             !strstr(payload, config::DEVICE_ID)) continue;
         char* sequenceField = strstr(payload, "\"sequences\":[");
@@ -319,13 +337,7 @@ void WifiTransport::receiveAcknowledgements() {
             }
         }
         if (!matches) continue;
-        bool acknowledged = true;
-        for (uint8_t i = 0; i < inFlightCount_; ++i) {
-            if (!spool_.acknowledge(inFlightSequences_[i])) {
-                acknowledged = false;
-                break;
-            }
-        }
+        const bool acknowledged = spool_.acknowledgeBatch(inFlightSequences_, inFlightCount_);
         if (acknowledged) {
             inFlightCount_ = 0;
             recordInFlight_ = false;
@@ -335,7 +347,7 @@ void WifiTransport::receiveAcknowledgements() {
 
 bool WifiTransport::sendStatus(uint32_t nowMs) {
     // 状态包使用 JSON，字段结构与 data_show/gun_wifi_monitor.py 的解析保持一致。
-    char payload[1400];
+    char payload[1800];
     char timestamp[20];
     const bool timestampValid = formatTimestamp(timestamp, sizeof(timestamp));
     const String localIp = WiFi.localIP().toString();
@@ -343,6 +355,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         payload, sizeof(payload),
         "{\"type\":\"status\",\"deviceId\":\"%s\",\"timestamp\":\"%s\","
         "\"timestampValid\":%s,\"uptimeMs\":%llu,\"bootId\":\"%016llx\","
+        "\"uploadOnly\":%s,\"controlId\":%llu,\"uploadTotal\":%llu,\"uploadPending\":%llu,"
         "\"lowPowerMode\":%s,"
         "\"localIp\":\"%s\",\"rssi\":%ld,"
         "\"mic\":{\"raw\":%u,\"p2p\":%u,\"rms\":%.1f,"
@@ -367,6 +380,9 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         config::DEVICE_ID, timestamp, timestampValid ? "true" : "false",
         static_cast<unsigned long long>(esp_timer_get_time() / 1000ULL),
         static_cast<unsigned long long>(bootId_),
+        uploadOnly_ ? "true" : "false", static_cast<unsigned long long>(controlId_),
+        static_cast<unsigned long long>(uploadTotal_),
+        static_cast<unsigned long long>(spool_.pendingCount() + pendingFlashRecordCount_),
         lowPowerMode_ ? "true" : "false", localIp.c_str(),
         static_cast<long>(WiFi.RSSI()), telemetry_.micRaw, telemetry_.micPeakToPeak,
         telemetry_.micRms, windowMicPeakToPeak_, windowMicRms_,

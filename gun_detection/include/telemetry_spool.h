@@ -32,6 +32,7 @@ public:
     bool peek(TelemetryRecord& sample);
     size_t peekBatch(TelemetryRecord* records, size_t capacity);
     bool acknowledge(uint64_t sequence);
+    bool acknowledgeBatch(const uint64_t* sequences, size_t count);
     void latchCapacityTestFull();
     uint64_t pendingCount() const;
     uint64_t capacityTestCurrentRecordCount() const { return capacityTestCurrentRecordCount_; }

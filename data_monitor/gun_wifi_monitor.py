@@ -14,6 +14,7 @@ from pathlib import Path
 import pyqtgraph as pg
 import trajectory_store
 from trajectory_map import TrajectoryMap
+from transfer_control import TransferControl, decode_records
 from PyQt5.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
@@ -80,6 +81,11 @@ class UdpReceiver(QObject):
                 pass
             self._socket = None
 
+    def send_control(self, payload, address):
+        if self._socket is None or self._stop.is_set():
+            raise OSError('尚未监听')
+        self._socket.sendto(payload, address)
+
     def _receive_loop(self, host, port):
         """绑定 UDP 端口、解析 JSON 包，并报告非法数据或套接字错误。"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -116,6 +122,7 @@ class UdpReceiver(QObject):
                     packet = json.loads(data.decode("utf-8-sig").strip())
                     if isinstance(packet, dict):
                         packet["_sender"] = f"{address[0]}:{address[1]}"
+                        packet['_address'] = address
                         if packet.get("type") == "telemetry":
                             try:
                                 self._store_telemetry_and_ack(database, sock, packet, address)
@@ -187,7 +194,7 @@ class UdpReceiver(QObject):
     def _store_telemetry_batch_and_ack(database, sock, packet, address):
         """一个事务写入整批记录；事务提交成功后才一次确认整批序号。"""
         device_id = str(packet["deviceId"])
-        records = packet["records"]
+        records = decode_records(packet)
         if not isinstance(records, list) or not records or len(records) > 64:
             raise ValueError("批次记录数无效")
 
@@ -248,7 +255,11 @@ class MonitorWindow(QMainWindow):
         self.last_packet_time = None
         self.shot_count = 0
         self.detection_counts = {"voice_count": 0, "vibration_count": 0}
+        self.transfer = TransferControl()
         self._build_ui()
+        self.transfer_timer = QTimer(self)
+        self.transfer_timer.timeout.connect(self.refresh_transfer)
+        self.transfer_timer.start(500)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_display)
         self.timer.start(UI_REFRESH_MS)
@@ -280,6 +291,15 @@ class MonitorWindow(QMainWindow):
         self.connection_label = QLabel("尚未监听")
         connection.addWidget(self.connection_label, 1)
         main.addLayout(connection)
+        transfer_bar = QHBoxLayout()
+        self.transfer_button = QPushButton('开始仅传输')
+        self.transfer_button.setEnabled(False)
+        self.transfer_button.clicked.connect(self.request_transfer)
+        transfer_bar.addWidget(self.transfer_button)
+        self.transfer_label = QLabel('等待设备连接')
+        self.transfer_label.setWordWrap(True)
+        transfer_bar.addWidget(self.transfer_label, 1)
+        main.addLayout(transfer_bar)
 
         summary = QGridLayout()
         self.values = {}
@@ -429,6 +449,11 @@ class MonitorWindow(QMainWindow):
             f"{packet.get('_sender', '')}  [{kind}]"
         )
         if kind == "status":
+            self.transfer.observe(packet)
+            self.refresh_transfer()
+            if packet.get('uploadOnly'):
+                self.values['gps'].setText('GPS：采集已暂停')
+                return
             self.trajectory_map.set_current_session(packet)
             self.handle_status(packet)
         elif kind == "shot":
@@ -443,6 +468,47 @@ class MonitorWindow(QMainWindow):
             return f"{float(value):.{digits}f}"
         except (TypeError, ValueError):
             return "—"
+
+    def request_transfer(self):
+        self.transfer.request()
+        self.refresh_transfer()
+
+    def refresh_transfer(self):
+        listening = self.receiver._socket is not None and not self.receiver._stop.is_set()
+        if listening:
+            command = self.transfer.command()
+            if command:
+                try:
+                    self.receiver.send_control(*command)
+                except OSError:
+                    self.transfer.note = '命令发送失败，正在重试…'
+        else:
+            self.transfer.pending = None
+        state = self.transfer.status or {}
+        active = bool(state.get('uploadOnly'))
+        self.transfer_button.setText('恢复采集' if active else '开始仅传输')
+        self.transfer_button.setEnabled(listening and self.transfer.available())
+        if self.transfer.pending:
+            message = self.transfer.note
+        elif not listening:
+            message = '未监听；设备将保持最后确认的工作模式'
+        elif not state:
+            message = '等待设备连接'
+        elif 'uploadOnly' not in state:
+            message = '设备固件尚不支持模式切换，请更新固件'
+        elif time.monotonic() - self.transfer.seen >= 15:
+            message = '设备暂未连接；恢复连接后自动更新传输状态'
+        elif active:
+            remaining = int(state.get('uploadPending', 0))
+            total = max(remaining, int(state.get('uploadTotal', 0)))
+            percent = 100 * (total - remaining) / total if total else 100
+            message = (f'仅传输：剩余 {remaining} / {total} 条 · {percent:.1f}% · '
+                       f'{self.transfer.rate:.1f} 条/秒') if remaining else '仅传输已完成，采集保持暂停，可恢复采集或关机'
+        else:
+            message = '正常采集 · 点击“开始仅传输”后暂停采集并上传全部缓存'
+        if self.transfer.note.startswith('切换未确认'):
+            message += ' · ' + self.transfer.note
+        self.transfer_label.setText(message)
 
     def handle_status(self, packet):
         """更新实时状态卡片，并将状态样本存入曲线缓存和 CSV 缓存。"""
