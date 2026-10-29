@@ -1,10 +1,11 @@
 #pragma once
 
 #include <Arduino.h>
+#include <FS.h>
 
 // Fixed-size flash record. Sequence and checksum are transport metadata.
 struct __attribute__((packed)) TelemetryRecord {
-    uint32_t magic = 0x544C4D31;  // TLM1
+    uint32_t magic = 0x544C4D32;  // TLM2 (reader also accepts TLM1)
     uint64_t sequence = 0;
     char timestamp[20] = {};
     uint16_t accelX = 0;
@@ -17,6 +18,9 @@ struct __attribute__((packed)) TelemetryRecord {
     double longitude = 0.0;
     uint8_t gpsValid = 0;
     uint8_t reserved[3] = {};
+    uint64_t bootId = 0;
+    uint64_t uptimeMs = 0;
+    uint32_t shotId = 0;  // Nonzero: durable shot location, not a sensor sample.
     uint32_t checksum = 0;
 };
 
@@ -47,11 +51,12 @@ public:
 private:
     static constexpr size_t SEGMENT_BYTES = 32768;
     static constexpr uint32_t LITTLEFS_WRITE_RESERVE_BYTES = 8192;
-    static constexpr uint32_t RECORD_MAGIC = 0x544C4D31;
+    static constexpr uint32_t RECORD_MAGIC = 0x544C4D32;
     // 512 x 32 KiB segments can address 16 MiB of queued telemetry files.
     static constexpr uint32_t SEGMENT_LIMIT = 512;
     static uint32_t checksum(const TelemetryRecord& record);
     static bool valid(const TelemetryRecord& record);
+    static bool readRecord(fs::File& file, TelemetryRecord& record);
     static void segmentPath(uint32_t index, char* path, size_t size);
     bool scan();
     bool reserveSequenceBlock();
@@ -76,6 +81,7 @@ private:
     uint32_t storageFullSnapshotTotalBytes_ = 0;
     TelemetryRecord segmentHeads_[SEGMENT_LIMIT] = {};
     size_t segmentOffsets_[SEGMENT_LIMIT] = {};
+    size_t segmentRecordBytes_[SEGMENT_LIMIT] = {};
     bool segmentHasPending_[SEGMENT_LIMIT] = {};
     bool segmentAppendable_[SEGMENT_LIMIT] = {};
     bool mounted_ = false;

@@ -65,7 +65,7 @@ public:
 
 private:
     static constexpr uint8_t QUEUE_SIZE = 16;
-    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 6;
+    static constexpr uint8_t TELEMETRY_BATCH_SIZE = 3;
     enum class EventType : uint8_t { Shot, Voice, Vibration };
     struct QueuedEvent {
         EventType type = EventType::Shot;
@@ -109,6 +109,7 @@ private:
     uint32_t failedSends_ = 0;
     uint32_t droppedEvents_ = 0;
     WifiTelemetry telemetry_;
+    uint64_t bootId_ = 0;
     uint16_t windowMicPeakToPeak_ = 0;
     float windowMicRms_ = 0.0F;
     float windowVibrationMagnitude_ = 0.0F;

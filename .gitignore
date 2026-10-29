@@ -1,6 +1,7 @@
 /csv/
 /data_monitor/amap_config.json
 /data_monitor/gun_telemetry.db*
+/data_monitor/__pycache__/
 /.ppt_work/
 /output/
 /.ppt_build/

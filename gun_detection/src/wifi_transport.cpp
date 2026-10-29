@@ -1,6 +1,7 @@
 #include "wifi_transport.h"
 
 #include <esp_timer.h>
+#include <esp_system.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +37,8 @@ static bool hasCalendarTimestamp(const char* timestamp) {
 }
 
 void WifiTransport::begin() {
+    bootId_ = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
+    if (bootId_ == 0) bootId_ = 1;
     spool_.begin(config::CAPACITY_TEST_MODE);
     enabled_ = config::WIFI_SSID[0] != '\0' && config::UPPER_COMPUTER_HOST[0] != '\0';
     if (!enabled_) {
@@ -89,6 +92,8 @@ void WifiTransport::update(uint32_t nowMs) {
         lastSpoolMs_ = nowMs;
         if (!spool_.capacityTestFull()) {
             TelemetryRecord record;
+            record.bootId = bootId_;
+            record.uptimeMs = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
             formatTimestamp(record.timestamp, sizeof(record.timestamp));
             record.accelX = telemetry_.vibrationX;
             record.accelY = telemetry_.vibrationY;
@@ -241,7 +246,7 @@ void WifiTransport::update(uint32_t nowMs) {
 }
 
 bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t count) {
-    // Six records keep datagrams compact while reducing ACK round trips.
+    // Three extended records keep datagrams below the usual Ethernet MTU.
     char payload[1600];
     int length = snprintf(payload, sizeof(payload),
                           "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"records\":[",
@@ -264,11 +269,15 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
             "%s{\"sequence\":%llu,\"timestamp\":\"%s\",\"timestampValid\":%s,"
             "\"accel_x\":%u,\"accel_y\":%u,\"accel_z\":%u,"
             "\"mic_raw\":%u,\"mic_p2p\":%u,\"mic_rms\":%.3f,"
-            "\"latitude\":%s,\"longitude\":%s}",
+            "\"latitude\":%s,\"longitude\":%s,\"bootId\":\"%016llx\","
+            "\"uptimeMs\":%llu,\"shotId\":%lu}",
             i ? "," : "", static_cast<unsigned long long>(record.sequence), record.timestamp,
             hasCalendarTimestamp(record.timestamp) ? "true" : "false",
             record.accelX, record.accelY, record.accelZ,
-            record.micRaw, record.micP2p, record.micRms, latitude, longitude);
+            record.micRaw, record.micP2p, record.micRms, latitude, longitude,
+            static_cast<unsigned long long>(record.bootId),
+            static_cast<unsigned long long>(record.uptimeMs),
+            static_cast<unsigned long>(record.shotId));
         if (written <= 0 || static_cast<size_t>(written) >= sizeof(payload) - static_cast<size_t>(length)) {
             return false;
         }
@@ -333,7 +342,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
     const int length = snprintf(
         payload, sizeof(payload),
         "{\"type\":\"status\",\"deviceId\":\"%s\",\"timestamp\":\"%s\","
-        "\"timestampValid\":%s,\"uptimeMs\":%lu,"
+        "\"timestampValid\":%s,\"uptimeMs\":%llu,\"bootId\":\"%016llx\","
         "\"lowPowerMode\":%s,"
         "\"localIp\":\"%s\",\"rssi\":%ld,"
         "\"mic\":{\"raw\":%u,\"p2p\":%u,\"rms\":%.1f,"
@@ -356,7 +365,9 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"fullSnapshot\":%s,\"fullSnapshotRecords\":%llu},"
         "\"sampleDrops\":{\"voice\":%lu,\"vibration\":%lu}}\r\n",
         config::DEVICE_ID, timestamp, timestampValid ? "true" : "false",
-        static_cast<unsigned long>(nowMs), lowPowerMode_ ? "true" : "false", localIp.c_str(),
+        static_cast<unsigned long long>(esp_timer_get_time() / 1000ULL),
+        static_cast<unsigned long long>(bootId_),
+        lowPowerMode_ ? "true" : "false", localIp.c_str(),
         static_cast<long>(WiFi.RSSI()), telemetry_.micRaw, telemetry_.micPeakToPeak,
         telemetry_.micRms, windowMicPeakToPeak_, windowMicRms_,
         telemetry_.vibrationReady ? "true" : "false", telemetry_.vibrationX,
@@ -416,6 +427,18 @@ bool WifiTransport::enqueue(const ShotEvent& event) {
     queued.type = EventType::Shot;
     queued.shot = event;
     formatTimestamp(queued.timestamp, sizeof(queued.timestamp));
+    // Save locations even when the live-event queue is full or Wi-Fi is offline.
+    TelemetryRecord location;
+    memcpy(location.timestamp, queued.timestamp, sizeof(location.timestamp));
+    location.bootId = bootId_;
+    location.uptimeMs = event.timestampUs / 1000ULL;
+    location.shotId = event.shotId;
+    location.latitude = event.gps.latitude;
+    location.longitude = event.gps.longitude;
+    location.gpsValid = event.gps.valid ? 1 : 0;
+    if (!spool_.append(location)) {
+        Serial.println("Shot location could not be persisted (storage unavailable/full).");
+    }
     if (!enqueueEvent(queued)) return false;
     lastShotCount_ = event.shotCount;
     return true;
@@ -455,20 +478,21 @@ bool WifiTransport::enqueueEvent(const QueuedEvent& event) {
 }
 
 bool WifiTransport::send(const QueuedEvent& event) {
-    char payload[512];
+    char payload[768];
     int length = 0;
     if (event.type == EventType::Shot) {
         const ShotEvent& shot = event.shot;
         length = snprintf(
             payload, sizeof(payload),
             "{\"type\":\"shot\",\"deviceId\":\"%s\",\"timestamp\":\"%s\","
-            "\"timestampValid\":%s,\"shotId\":%lu,\"shotCount\":%lu,\"uptimeUs\":%llu,"
+            "\"timestampValid\":%s,\"bootId\":\"%016llx\",\"shotId\":%lu,\"shotCount\":%lu,\"uptimeUs\":%llu,"
             "\"voiceP2P\":%u,\"voiceRms\":%.1f,\"voiceRiseRatio\":%.2f,"
             "\"accelX\":%u,\"accelY\":%u,\"accelZ\":%u,\"accelPeak\":%.1f,"
             "\"accelJerk\":%.1f,\"accelSaturated\":%s,\"gpsValid\":%s,"
             "\"latitude\":%.7f,\"longitude\":%.7f,\"altitudeM\":%.1f,"
             "\"speedKmph\":%.1f,\"hdop\":%.1f,\"satellites\":%lu,\"gpsAgeMs\":%lu}\r\n",
             config::DEVICE_ID, event.timestamp, hasCalendarTimestamp(event.timestamp) ? "true" : "false",
+            static_cast<unsigned long long>(bootId_),
             static_cast<unsigned long>(shot.shotId), static_cast<unsigned long>(shot.shotCount),
             static_cast<unsigned long long>(shot.timestampUs), shot.voice.peakToPeak,
             shot.voice.rms, shot.voice.riseRatio, shot.vibration.rawX, shot.vibration.rawY,

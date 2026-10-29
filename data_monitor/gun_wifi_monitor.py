@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pyqtgraph as pg
+import trajectory_store
+from trajectory_map import TrajectoryMap
 from PyQt5.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
@@ -27,6 +29,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -98,6 +101,7 @@ class UdpReceiver(QObject):
                 "PRIMARY KEY (device_id, sequence));"
             )
             database.commit()
+            trajectory_store.initialize(database)
             self.listening.emit(True, f"监听中：{host}:{port}")
             while not self._stop.is_set():
                 try:
@@ -122,6 +126,12 @@ class UdpReceiver(QObject):
                                 self._store_telemetry_batch_and_ack(database, sock, packet, address)
                             except (sqlite3.DatabaseError, KeyError, TypeError, ValueError) as exc:
                                 self.receiver_error.emit(f"遥测批次入库失败，未确认设备记录：{exc}")
+                        elif packet.get("type") in ("status", "shot"):
+                            try:
+                                with database:
+                                    trajectory_store.store(database, packet)
+                            except (sqlite3.DatabaseError, TypeError, ValueError) as exc:
+                                self.receiver_error.emit(f"轨迹保存失败：{exc}")
                         # 批量遥测只用于数据库入库；状态包继续驱动实时界面，避免批次包覆盖状态摘要。
                         if packet.get("type") != "telemetry_batch":
                             self.packet_received.emit(packet)
@@ -151,6 +161,7 @@ class UdpReceiver(QObject):
         # timestampValid 仅表示是否已校准到日历时间；未校时的 T+... 也应保存。
         timestamp = packet.get("timestamp") or None
         with database:
+            trajectory_store.store(database, packet)
             cursor = database.execute(
                 "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
                 (device_id, sequence),
@@ -192,11 +203,12 @@ class UdpReceiver(QObject):
                     raise ValueError("批次中存在重复序号")
                 seen_sequences.add(sequence)
                 sequences.append(sequence)
+                trajectory_store.store(database, packet, record)
                 cursor = database.execute(
                     "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
                     (device_id, sequence),
                 )
-                if cursor.rowcount:
+                if cursor.rowcount and not record.get("shotId"):
                     # GPS/NTP 尚未校时也保存 T+HH:MM:SS 上电计时。
                     timestamp = record.get("timestamp") or None
                     new_rows.append((
@@ -335,7 +347,11 @@ class MonitorWindow(QMainWindow):
 
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot_widget.setBackground("w")
-        main.addWidget(self.plot_widget, 1)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.plot_widget, "实时曲线")
+        self.trajectory_map = TrajectoryMap(DATABASE_PATH)
+        self.tabs.addTab(self.trajectory_map, "GPS 地图")
+        main.addWidget(self.tabs, 1)
         self.accel_plot = self.plot_widget.addPlot(row=0, col=0, title="三轴加速度原始 ADC 值")
         self.accel_plot.setLabel("bottom", "时间", units="s")
         self.accel_plot.showGrid(x=True, y=True, alpha=0.25)
@@ -413,6 +429,7 @@ class MonitorWindow(QMainWindow):
             f"{packet.get('_sender', '')}  [{kind}]"
         )
         if kind == "status":
+            self.trajectory_map.set_current_session(packet)
             self.handle_status(packet)
         elif kind == "shot":
             self.handle_shot(packet)

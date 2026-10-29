@@ -31,6 +31,28 @@ bool TelemetrySpool::valid(const TelemetryRecord& record) {
     return record.magic == RECORD_MAGIC && record.checksum == checksum(record);
 }
 
+// Read TLM1 in place; never rewrite or discard legacy cached samples.
+bool TelemetrySpool::readRecord(fs::File& file, TelemetryRecord& record) {
+    record = TelemetryRecord{};
+    if (file.read(reinterpret_cast<uint8_t*>(&record.magic), 4) != 4) return false;
+    if (record.magic == RECORD_MAGIC) {
+        return file.read(reinterpret_cast<uint8_t*>(&record) + 4, sizeof(record) - 4) ==
+                   sizeof(record) - 4 && valid(record);
+    }
+    if (record.magic != 0x544C4D31) return false;
+    constexpr size_t prefix = offsetof(TelemetryRecord, bootId);
+    uint32_t oldChecksum = 0;
+    if (file.read(reinterpret_cast<uint8_t*>(&record) + 4, prefix - 4) != prefix - 4 ||
+        file.read(reinterpret_cast<uint8_t*>(&oldChecksum), 4) != 4) return false;
+    uint32_t value = 2166136261u;
+    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&record);
+    for (size_t i = 0; i < prefix; ++i) value = (value ^ bytes[i]) * 16777619u;
+    if (value != oldChecksum) return false;
+    record.magic = RECORD_MAGIC;
+    record.checksum = checksum(record);
+    return true;
+}
+
 uint32_t TelemetrySpool::storageUsedBytes() const {
     if (capacityTestMode_ && capacityTestFull_) return capacityTestUsedBytes_;
     if (storageFullSnapshotValid_) return storageFullSnapshotUsedBytes_;
@@ -207,6 +229,7 @@ bool TelemetrySpool::scan() {
     memset(segmentOffsets_, 0, sizeof(segmentOffsets_));
     memset(segmentHasPending_, 0, sizeof(segmentHasPending_));
     memset(segmentAppendable_, 0, sizeof(segmentAppendable_));
+    for (auto& bytes : segmentRecordBytes_) bytes = sizeof(TelemetryRecord);
     pendingRecordCount_ = 0;
     uint64_t maximumSequence = acknowledgedSequence_;
     latestSegment_ = 0;
@@ -221,8 +244,9 @@ bool TelemetrySpool::scan() {
         latestSegment_ = max(latestSegment_, index);
         size_t offset = 0;
         TelemetryRecord record;
-        while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
+        while (readRecord(file, record)) {
             if (!valid(record)) break;  // Ignore a torn/corrupt tail; never overwrite it.
+            segmentRecordBytes_[index] = file.position() - offset;
             maximumSequence = max(maximumSequence, record.sequence);
             if (record.sequence > acknowledgedSequence_) {
                 ++pendingRecordCount_;
@@ -232,9 +256,10 @@ bool TelemetrySpool::scan() {
                     segmentHasPending_[index] = true;
                 }
             }
-            offset += sizeof(record);
+            offset = file.position();
         }
-        segmentAppendable_[index] = offset == file.size() &&
+        segmentAppendable_[index] = segmentRecordBytes_[index] == sizeof(TelemetryRecord) &&
+                                    offset == file.size() &&
                                     file.size() % sizeof(TelemetryRecord) == 0 &&
                                     file.size() <= SEGMENT_BYTES;
         file.close();
@@ -306,6 +331,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
         }
     }
     const size_t recordOffset = file ? file.size() : 0;
+    segmentRecordBytes_[targetSegment] = sizeof(TelemetryRecord);
     const bool written = file && file.write(reinterpret_cast<const uint8_t*>(&record), sizeof(record)) == sizeof(record);
     if (file) file.close();
     if (!written) {
@@ -386,6 +412,7 @@ size_t TelemetrySpool::appendBatch(const TelemetryRecord* samples, size_t count)
         }
     }
 
+    segmentRecordBytes_[targetSegment] = sizeof(TelemetryRecord);
     const size_t recordOffset = file.size();
     TelemetryRecord batch[config::TELEMETRY_FLASH_BATCH_RECORDS] = {};
     for (size_t i = 0; i < count; ++i) {
@@ -447,14 +474,14 @@ void TelemetrySpool::advanceSegment(uint32_t segment) {
         segmentHasPending_[segment] = false;
         return;
     }
-    size_t offset = segmentOffsets_[segment] + sizeof(TelemetryRecord);
+    size_t offset = segmentOffsets_[segment] + segmentRecordBytes_[segment];
     if (!file.seek(offset, SeekSet)) {
         file.close();
         segmentHasPending_[segment] = false;
         return;
     }
     TelemetryRecord record;
-    while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
+    while (readRecord(file, record)) {
         if (!valid(record)) break;
         if (record.sequence > acknowledgedSequence_) {
             segmentHeads_[segment] = record;
@@ -463,7 +490,7 @@ void TelemetrySpool::advanceSegment(uint32_t segment) {
             file.close();
             return;
         }
-        offset += sizeof(record);
+        offset = file.position();
     }
     file.close();
     segmentHasPending_[segment] = false;
@@ -491,7 +518,7 @@ size_t TelemetrySpool::peekBatch(TelemetryRecord* records, size_t capacity) {
 
     size_t count = 0;
     TelemetryRecord record;
-    while (count < capacity && file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
+    while (count < capacity && readRecord(file, record)) {
         if (!valid(record) || record.sequence <= acknowledgedSequence_) break;
         records[count++] = record;
     }
@@ -566,7 +593,7 @@ bool TelemetrySpool::compactAcknowledgedSegments() {
         bool hasValidRecord = false;
         bool allAcknowledged = true;
         TelemetryRecord record;
-        while (file.read(reinterpret_cast<uint8_t*>(&record), sizeof(record)) == sizeof(record)) {
+        while (readRecord(file, record)) {
             if (!valid(record)) break;
             hasValidRecord = true;
             if (record.sequence > acknowledgedSequence_) allAcknowledged = false;

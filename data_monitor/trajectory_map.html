@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+html,body{height:100%;margin:0;font:14px "Microsoft YaHei",sans-serif;color:#233348;background:#f4f7fb}
+body{display:flex;flex-direction:column} #bar,#playbar{display:flex;align-items:center;gap:10px;padding:8px;flex-wrap:wrap}
+button,select{padding:6px 10px;border:1px solid #c5d0de;border-radius:5px;background:white;color:#233348}
+button{cursor:pointer}button:disabled{opacity:.5;cursor:default}#sessions{max-width:410px}
+#map{flex:1;min-height:180px}#message{padding:5px 12px;color:#52657d;white-space:pre-wrap}
+#seek{flex:1;min-width:120px}.pin{padding:4px 7px;background:#2375d8;color:white;border-radius:6px;white-space:nowrap;border:2px solid white}
+.start{background:#16834a}.shot{background:#c64236}.replay{background:#8256cc}.info{padding:6px;line-height:1.8;white-space:pre-line}
+</style></head><body>
+<div id="bar"><label>上电轨迹 <select id="sessions"><option>尚无轨迹</option></select></label>
+<button id="latest">返回当前轨迹</button><label><input id="follow" type="checkbox" checked>自动跟随</label>
+<button id="fit">查看完整轨迹</button><span>绿：起点　蓝：末次定位　红：射击</span></div>
+<div id="map"></div>
+<div id="playbar"><button id="play">播放</button><button id="reset">回到起点</button>
+<select id="speed"><option value="1">1 倍速</option><option value="5">5 倍速</option><option value="20">20 倍速</option><option value="100">100 倍速</option></select>
+<input id="seek" type="range" min="0" max="0" value="0" step="1"><span id="clock">—</span></div>
+<div id="message">正在加载高德地图…</div>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script>
+'use strict';
+const config=__AMAP_CONFIG__;
+window._AMapSecurityConfig={securityJsCode:config.securityJsCode};
+let map,bridge,info,track=null,points=[],lines=[],markers=[],replayMarker=null;
+let selected='',autoCurrent=true,revision='',playing=false,replaying=false,playMs=0,lastFrame=0,requestBusy=false;
+let selectionGeneration=0,firstFit=true,mapError='',mapLoaded=false;
+const $=id=>document.getElementById(id);
+const key=s=>JSON.stringify([s.device,s.boot]);
+const say=text=>{$('message').textContent=text;};
+window.addEventListener('error',event=>{say('地图页面错误：'+event.message);});
+
+// GPS stores WGS-84. Apply the GCJ-02 display transform once; never alter stored coordinates.
+function gcj(lon,lat){
+  if(lon<72.004||lon>137.8347||lat<0.8293||lat>55.8271)return [lon,lat];
+  const pi=Math.PI,x=lon-105,y=lat-35;
+  let dlat=-100+2*x+3*y+.2*y*y+.1*x*y+.2*Math.sqrt(Math.abs(x));
+  dlat+=(20*Math.sin(6*x*pi)+20*Math.sin(2*x*pi))*2/3;
+  dlat+=(20*Math.sin(y*pi)+40*Math.sin(y*pi/3))*2/3;
+  dlat+=(160*Math.sin(y*pi/12)+320*Math.sin(y*pi/30))*2/3;
+  let dlon=300+x+2*y+.1*x*x+.1*x*y+.1*Math.sqrt(Math.abs(x));
+  dlon+=(20*Math.sin(6*x*pi)+20*Math.sin(2*x*pi))*2/3;
+  dlon+=(20*Math.sin(x*pi)+40*Math.sin(x*pi/3))*2/3;
+  dlon+=(150*Math.sin(x*pi/12)+300*Math.sin(x*pi/30))*2/3;
+  const rad=lat*pi/180,magic=1-.00669342162296594323*Math.sin(rad)**2,sqrt=Math.sqrt(magic);
+  return [lon+dlon*180/(6378245/sqrt*Math.cos(rad)*pi),
+          lat+dlat*180/((6378245*(1-.00669342162296594323))/(magic*sqrt)*pi)];
+}
+function displayPoint(p){return {...p,xy:p.valid?gcj(p.lon,p.lat):null};}
+function popup(p,title){
+  const node=document.createElement('div');node.className='info';
+  node.textContent=title+'\n'+p.time+'\n上电计时 '+(p.ms/1000).toFixed(1)+' 秒\nGPS '+p.lat.toFixed(7)+', '+p.lon.toFixed(7);
+  info.setContent(node);info.open(map,p.xy);
+}
+function pin(p,label,style){
+  const node=document.createElement('div');node.className='pin '+style;node.textContent=label;
+  const marker=new AMap.Marker({position:p.xy,content:node,anchor:'bottom-center',map});
+  marker.on('click',()=>popup(p,label));markers.push(marker);return marker;
+}
+function stop(){playing=false;$('play').textContent='播放';}
+function clear(){
+  stop();replaying=false;
+  if(map){map.remove([...lines,...markers]);if(replayMarker)map.remove(replayMarker);if(info)info.close();}
+  lines=[];markers=[];replayMarker=null;points=[];track=null;revision='';
+  $('seek').max=0;$('seek').value=0;$('clock').textContent='—';
+}
+function select(value){
+  if(selected===value)return;
+  selected=value;selectionGeneration++;firstFit=true;clear();
+  if(bridge)loadTrack();
+}
+function fit(){
+  if(map&&[...lines,...markers].length)map.setFitView([...lines,...markers],false,[45,45,45,45],17);
+}
+function summary(){
+  if(!track)return;
+  const n=track.shots.filter(p=>p.valid).length,invalid=track.shots.length-n;
+  say((mapError?mapError+'\n':'')+`${points.length} 个显示轨迹点 · ${n} 个射击位置`+
+      (invalid?` · ${invalid} 次射击无有效定位`:'')+
+      ` · 显示采样间隔约 ${(track.bucket_ms/1000).toFixed(1)} 秒（原始记录完整保存）`+
+      (track.boot==='legacy'?' · 旧版数据无法准确区分上电次数，回放顺序仅供参考':'')+
+      (!points.length?' · 等待有效 GPS 定位':'')+' · 点击轨迹或标记查看时间');
+}
+function draw(data){
+  track=data;
+  const validPoints=data.points.map(displayPoint);
+  points=validPoints.filter(p=>p.valid);
+  if(!map){summary();return;}
+  map.remove([...lines,...markers]);lines=[];markers=[];
+  let segment=[];
+  const flush=()=>{
+    if(segment.length>1){
+      const samples=segment;
+      const line=new AMap.Polyline({path:samples.map(p=>p.xy),strokeColor:'#2375d8',strokeWeight:5,map});
+      line.on('click',event=>{
+        const click=map.lngLatToContainer(event.lnglat);
+        let nearest=samples[0],distance=Infinity;
+        for(const p of samples){const screen=map.lngLatToContainer(p.xy);
+          const d=(screen.x-click.x)**2+(screen.y-click.y)**2;
+          if(d<distance){distance=d;nearest=p;}}
+        popup(nearest,'轨迹采样');
+      });lines.push(line);
+    }
+    segment=[];
+  };
+  for(const p of validPoints){
+    if(!p.valid){flush();continue;}
+    if(segment.length&&p.ms-segment[segment.length-1].ms>Math.max(30000,data.bucket_ms*3))flush();
+    segment.push(p);
+  }flush();
+  if(points.length){
+    pin(points[0],'起点','start');pin(points[points.length-1],'末次定位','');
+    $('seek').max=Math.max(0,points[points.length-1].ms-points[0].ms);
+    if(!replaying){playMs=points[0].ms;$('seek').value=0;$('clock').textContent=points[points.length-1].time;}
+  }
+  for(const raw of data.shots){const p=displayPoint(raw);if(p.valid)pin(p,'射击 '+p.shot,'shot');}
+  if(firstFit&&markers.length){fit();firstFit=false;}
+  else if($('follow').checked&&!replaying&&points.length)map.setCenter(points[points.length-1].xy);
+  $('play').disabled=points.length<2;$('reset').disabled=!points.length;
+  if(replaying)showPlayback();summary();
+}
+function showPlayback(){
+  if(!points.length||!map)return;
+  replaying=true;
+  let lo=0,hi=points.length-1;
+  while(lo<hi){const mid=Math.ceil((lo+hi)/2);if(points[mid].ms<=playMs)lo=mid;else hi=mid-1;}
+  const p=points[lo];
+  if(!replayMarker){
+    const node=document.createElement('div');node.className='pin replay';node.textContent='回放';
+    replayMarker=new AMap.Marker({position:p.xy,content:node,anchor:'bottom-center',zIndex:200,map});
+    replayMarker.on('click',()=>{const current=replayMarker.getExtData();if(current)popup(current,'回放位置');});
+  }
+  replayMarker.setPosition(p.xy);replayMarker.setExtData(p);
+  $('seek').value=playMs-points[0].ms;$('clock').textContent=p.time;
+  if($('follow').checked)map.setCenter(p.xy);
+}
+function animate(now){
+  if(playing&&points.length){
+    playMs+=Math.min(now-lastFrame,1000)*Number($('speed').value);
+    const end=points[points.length-1].ms;
+    if(playMs>=end){playMs=end;stop();}showPlayback();
+  }
+  lastFrame=now;requestAnimationFrame(animate);
+}
+function loadTrack(){
+  if(!selected||requestBusy||!bridge)return;
+  requestBusy=true;const generation=selectionGeneration;const [device,boot]=JSON.parse(selected);
+  bridge.requestTrack(device,boot,generation,revision);
+}
+function trackReady(raw,generation){
+    requestBusy=false;
+    if(generation!==selectionGeneration){loadTrack();return;}
+    let data;try{data=JSON.parse(raw);}catch(e){say('轨迹数据格式错误');return;}
+    if(data.error){say(data.error);return;}
+    if(data.unchanged)return;
+    if(key(data)!==selected){loadTrack();return;}
+    const nextRevision=JSON.stringify(data.revision);
+    if(nextRevision!==revision){revision=nextRevision;draw(data);}
+}
+function refresh(force=false){
+  if(!bridge||(document.hidden&&!force))return;
+  bridge.sessions(raw=>{
+    const items=JSON.parse(raw);if(items.error){say(items.error);return;}
+    const previous=selected;
+    $('sessions').textContent='';
+    for(const s of items){const option=document.createElement('option');option.value=key(s);option.textContent=s.label;$('sessions').appendChild(option);}
+    if(!items.length){say('尚无轨迹，请开始监听；收到有效 GPS 后显示位置。');return;}
+    $('sessions').value=previous;
+    bridge.current(rawCurrent=>{
+      const current=JSON.parse(rawCurrent);
+      const target=autoCurrent&&current&&items.some(s=>key(s)===key(current))?key(current):
+        (items.some(s=>key(s)===selected)?selected:key(items[0]));
+      $('sessions').value=target;select(target);loadTrack();
+    });
+  });
+}
+$('sessions').onchange=()=>{autoCurrent=false;select($('sessions').value);};
+$('latest').onclick=()=>{
+  autoCurrent=true;stop();replaying=false;
+  if(map&&replayMarker){map.remove(replayMarker);replayMarker=null;}
+  if(map&&points.length)map.setCenter(points[points.length-1].xy);
+  refresh(true);
+};
+$('follow').onchange=()=>{
+  if(!$('follow').checked||!map||!points.length)return;
+  if(replaying)showPlayback();else map.setCenter(points[points.length-1].xy);
+};
+$('fit').onclick=fit;
+$('play').onclick=()=>{
+  if(points.length<2)return;
+  if(playing){stop();return;}
+  if(playMs>=points[points.length-1].ms)playMs=points[0].ms;
+  playing=true;replaying=true;$('play').textContent='暂停';lastFrame=performance.now();
+};
+$('reset').onclick=()=>{stop();if(points.length){playMs=points[0].ms;showPlayback();}};
+$('seek').oninput=()=>{stop();if(points.length){playMs=points[0].ms+Number($('seek').value);showPlayback();}};
+function startMap(){
+  try{
+    map=new AMap.Map('map',{zoom:14,viewMode:'2D',center:[116.397428,39.90923]});
+    info=new AMap.InfoWindow({offset:new AMap.Pixel(0,-25)});
+    map.on('dragstart',()=>{$('follow').checked=false;});
+    map.on('complete',()=>{mapLoaded=true;mapError='';if(track)summary();});
+    if(track)draw(track);else say('地图已加载，等待轨迹数据。');
+  }catch(e){mapError='高德地图初始化失败，请检查网络、密钥及域名白名单后重新加载。';say(mapError);}
+}
+new QWebChannel(qt.webChannelTransport,channel=>{
+  bridge=channel.objects.history;bridge.trackReady.connect(trackReady);refresh(true);setInterval(refresh,2000);
+});
+const script=document.createElement('script');
+script.src='https://webapi.amap.com/maps?v=2.0&key='+encodeURIComponent(config.key);
+script.onload=startMap;
+script.onerror=()=>{mapError='高德地图加载失败，请检查网络连接后重新加载。轨迹仍在本地保存。';say(mapError);};
+document.head.appendChild(script);
+setTimeout(()=>{if(!mapLoaded){mapError='高德底图尚未就绪，请检查网络、密钥类型和域名白名单。轨迹仍在保存。';say(mapError);}},20000);
+requestAnimationFrame(animate);
+</script></body></html>
