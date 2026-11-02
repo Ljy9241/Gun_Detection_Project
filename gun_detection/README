@@ -17,7 +17,8 @@
 - `adc_sampler`：用 ESP32-S3 ADC1 数字控制器 DMA 扫描麦克风和三轴输入，总转换率 4 kHz，即每路 1 kHz；主循环延迟期间由 DMA 缓冲样本。
 - `voice_detection`：消费 1 kHz 麦克风样本，每 10 ms 计算峰峰值、均方根和能量突增并进行声音检测。
 - `vibrate_detection`：消费 1 kHz 三轴样本，进行基线、幅值、变化量和角度校准。
-- `shot_detector`：按时间窗口融合声音与振动事件，并抑制重复射击事件。
+- `motion_direction`：每 50 ms 从三轴输入取样，静止校准后按动作能量占比区分横向、竖向与不确定动作。
+- `shot_detector`：将一次完整横向动作记录为一次射击事件；竖向或不确定动作不计数。
 - `gps_manager`：通过 UART1 持续解析 NMEA 数据。
 - `wifi_transport`：非阻塞管理 Wi-Fi 连接，并通过 UDP/JSON 发送状态和事件。
 - `telemetry_spool`：使用 LittleFS 分段保存 20 Hz 遥测记录，支持断电后恢复。
@@ -50,7 +51,28 @@ GPS 和 NTP 校准后，RTC 可在设备持续供电时继续推进时间；ESP3
 
 ## 检测事件
 
-每次声音或振动触发都会独立排队，并作为 `detection` UDP 事件上传；`detectionType` 分别为 `voice` 和 `vibration`。状态包包含自启动以来累计的 `voiceDetectionCount` 和 `vibrationDetectionCount`，上位机分别显示两种检测次数和最近事件详情。声音与振动融合后仍作为 `shot` 事件上传。
+每次声音或振动触发仍独立作为 `detection` UDP 事件上传；`detectionType` 分别为 `voice` 和 `vibration`。状态包保留累计 `voiceDetectionCount` 和 `vibrationDetectionCount`。声音和振动检测不再生成射击事件。
+
+射击记录现在只由**横向动作**触发，沿用 `type: shot`、射击编号、累计计数、GPS 定位、Flash 位置记录和原上传流程，并增加 `source: horizontal_motion`。旧兼容字段 `voiceP2P/voiceRms/voiceRiseRatio/accelJerk` 为 0；`accelX/Y/Z` 是动作向量峰值时的读数，`accelPeak` 为去基线后的向量峰值。上位机显示“射击次数（横向动作）”，最近事件标明“横向动作”。上传专用模式暂停识别，恢复采样后重新静止校准，不补发暂停前的未完成动作。
+
+启动或数据中断后保持静止约 2 秒。当前传感器安装方式下横向为 **Z 轴主导**，判定要求 `Ez >= 0.65*(Ex+Ey+Ez)` 且 `Ez >= 3*Ex`，其中能量为动作期间去静止基线后的平方和。竖向为 X 轴主导，仅识别，不生成射击记录。
+
+方向参数集中在 `include/motion_direction.h`：启动幅值 100 counts、结束幅值 60 counts、峰值至少 200 counts；结束静止确认 0.5 秒、动作最长 3 秒、完成后冷却 1 秒。不依赖每 10 秒的动作间隔。1 kHz ADC 输入在识别器内部降至最高 20 Hz。方向轴映射和阈值依据 2026-10-26 的两份动作录制，换安装方向或输入滤波方式后需重新验证。
+
+### 动作回归验证
+
+`tests/native/motion_shot_test.cpp` 直接编译生产用方向识别器和射击记录器，验证 1 kHz/20 Hz 输入、横向单次计数、竖向及混合动作拒绝、重复事件抑制、GPS 附加、采样中断与复位。测试桩仅替代 Arduino/GPS 头文件，不替代判定逻辑。
+
+在项目根目录运行（需要 g++ 和 Python）：
+
+```powershell
+New-Item -ItemType Directory -Force output/motion_direction/native | Out-Null
+g++ -std=c++17 -Wall -Wextra -Werror -static -Igun_detection/tests/native/stubs -Igun_detection/include gun_detection/src/motion_direction.cpp gun_detection/src/shot_detector.cpp gun_detection/tests/native/motion_shot_test.cpp -o output/motion_direction/native/motion_shot_test.exe
+./output/motion_direction/native/motion_shot_test.exe
+python gun_detection/tests/native/replay_recordings.py output/motion_direction/native/motion_shot_test.exe
+```
+
+原录制回放的预期结果：横向 30 次 → 30 条射击记录；竖向 30 次 → 0 条射击记录。CSV 秒内时间按原始顺序均匀重建，回放不等于实机验证。
 
 ## 遥测数据持久化
 

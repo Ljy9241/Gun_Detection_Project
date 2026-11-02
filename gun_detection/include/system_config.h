@@ -43,15 +43,13 @@ inline constexpr float VIBRATE_QUIET_THRESHOLD_COUNTS = 90.0F;
 inline constexpr uint8_t VIBRATE_TRIGGER_SAMPLES = 2;
 inline constexpr uint32_t VIBRATE_RETRIGGER_US = 50000;
 
-// 声音与振动事件的融合窗口及融合后的重复触发冷却时间。
-inline constexpr uint32_t FUSION_WINDOW_US = 100000;
-inline constexpr uint32_t SHOT_COOLDOWN_US = 150000;
+// 射击记录改由横向动作触发；方向识别阈值在 motion_direction.h 中配置。
 
 // Wi-Fi 与上位机配置；进行网络联调前请填写实际热点和电脑地址。
 inline constexpr char WIFI_SSID[] = "ljy";
 inline constexpr char WIFI_PASSWORD[] = "zxcvbnm1";
 // 此处填写电脑无线网卡的 IPv4 地址，不要填写手机热点网关地址。
-inline constexpr char UPPER_COMPUTER_HOST[] = "10.126.104.83";
+inline constexpr char UPPER_COMPUTER_HOST[] = "10.239.22.83";
 inline constexpr uint16_t UPPER_COMPUTER_PORT = 8888;
 inline constexpr uint16_t DEVICE_UDP_PORT = 8889;  // 接收电脑端入库确认（ACK）。
 inline constexpr char NTP_SERVER[] = "pool.ntp.org";

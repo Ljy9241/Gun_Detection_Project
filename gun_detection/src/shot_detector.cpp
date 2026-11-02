@@ -1,54 +1,22 @@
 #include "shot_detector.h"
 
-#include "system_config.h"
-
-void ShotDetector::onVoiceEvent(const VoiceEvent& event) {
-    voiceEvent_ = event;
-    voiceValid_ = true;
-    tryFuse(event.timestampUs);
-}
-
-void ShotDetector::onVibrateEvent(const VibrateEvent& event) {
-    vibrationEvent_ = event;
-    vibrationValid_ = true;
-    tryFuse(event.timestampUs);
-}
-
-void ShotDetector::update(uint64_t nowUs) {
-    // 丢弃过期的单传感器候选，避免将相隔很久的响声和振动误合并。
-    if (voiceValid_ && nowUs - voiceEvent_.timestampUs > config::FUSION_WINDOW_US) {
-        voiceValid_ = false;
-    }
-    if (vibrationValid_ && nowUs - vibrationEvent_.timestampUs > config::FUSION_WINDOW_US) {
-        vibrationValid_ = false;
-    }
-}
-
-void ShotDetector::tryFuse(uint64_t nowUs) {
-    if (!voiceValid_ || !vibrationValid_ || shotPending_) {
-        return;
-    }
-
-    // 使用绝对时间差，不依赖声音或振动哪一个先到达。
-    const uint64_t difference = voiceEvent_.timestampUs > vibrationEvent_.timestampUs
-                                    ? voiceEvent_.timestampUs - vibrationEvent_.timestampUs
-                                    : vibrationEvent_.timestampUs - voiceEvent_.timestampUs;
-    const bool withinWindow = difference <= config::FUSION_WINDOW_US;
-    const bool cooldownReady = lastShotUs_ == 0 || nowUs - lastShotUs_ >= config::SHOT_COOLDOWN_US;
-    if (!withinWindow || !cooldownReady) {
-        return;
-    }
-
-    ++shotCount_;
-    pendingShot_.shotId = shotCount_;
+void ShotDetector::onMotionEvent(const MotionEvent& event) {
+    if (event.direction != MotionDirection::Horizontal || shotPending_) return;
+    if (shotCount_ != 0 && event.timestampUs <= lastShotUs_) return;
+    pendingShot_ = ShotEvent{};
+    pendingShot_.shotId = ++shotCount_;
     pendingShot_.shotCount = shotCount_;
-    pendingShot_.timestampUs = max(voiceEvent_.timestampUs, vibrationEvent_.timestampUs);
-    pendingShot_.voice = voiceEvent_;
-    pendingShot_.vibration = vibrationEvent_;
+    pendingShot_.timestampUs = event.timestampUs;
+    pendingShot_.motion = event;
+    // 兼容原 UDP 字段，填入横向动作峰值时的真实三轴读数。
+    // 声音和 jerk 保持 0，不伪造声音融合或冲击测量。
+    pendingShot_.vibration.timestampUs = event.timestampUs;
+    pendingShot_.vibration.rawX = event.peakX;
+    pendingShot_.vibration.rawY = event.peakY;
+    pendingShot_.vibration.rawZ = event.peakZ;
+    pendingShot_.vibration.peakMagnitude = event.peak;
     shotPending_ = true;
     lastShotUs_ = pendingShot_.timestampUs;
-    voiceValid_ = false;
-    vibrationValid_ = false;
 }
 
 bool ShotDetector::consumeShot(ShotEvent& event, const GpsFix& gpsFix) {

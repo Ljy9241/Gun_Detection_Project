@@ -12,9 +12,10 @@
 #include "voice_detection.h"
 #include "wifi_transport.h"
 
-// 网络与事件融合由主循环调度；高优先级 ADC 任务持续读取并处理传感器采样。
+// 网络与射击记录由主循环调度；高优先级 ADC 任务持续识别动作。
 VoiceDetection voiceDetection;
 VibrateDetection vibrateDetection;
+MotionDirectionDetector motionDetection;
 GpsManager gps(Serial1);
 ShotDetector shotDetector;
 WifiTransport wifiTransport;
@@ -42,6 +43,8 @@ uint32_t lowPowerGpsFixStartMs = 0;
 uint32_t nextLowPowerGpsStartMs = 0;
 
 struct SensorSnapshot {
+    MotionEvent motionEvent;
+    bool hasMotionEvent = false;
     VoiceEvent voiceEvent;
     VibrateEvent vibrationEvent;
     uint16_t micRaw = 0;
@@ -90,6 +93,8 @@ static void processAdcSample(const AdcSample& sample) {
         voiceDetection.processSample(pendingMicSample, sample.timestampUs);
         vibrateDetection.processSample(pendingAccelX, pendingAccelY,
                                        pendingAccelZ, sample.timestampUs);
+        motionDetection.processSample(pendingAccelX, pendingAccelY,
+                                      pendingAccelZ, sample.timestampUs);
         portEXIT_CRITICAL(&sensorStateMux);
         pendingAdcMask = 0;
     }
@@ -98,6 +103,7 @@ static void processAdcSample(const AdcSample& sample) {
 static SensorSnapshot captureSensorSnapshot() {
     SensorSnapshot snapshot;
     portENTER_CRITICAL(&sensorStateMux);
+    snapshot.hasMotionEvent = motionDetection.consumeEvent(snapshot.motionEvent);
     snapshot.hasVoiceEvent = voiceDetection.consumeEvent(snapshot.voiceEvent);
     snapshot.hasVibrationEvent = vibrateDetection.consumeEvent(snapshot.vibrationEvent);
     snapshot.micRaw = voiceDetection.latestRaw();
@@ -134,6 +140,7 @@ static void adcReaderTask(void*) {
             portENTER_CRITICAL(&sensorStateMux);
             voiceDetection = VoiceDetection{};
             vibrateDetection = VibrateDetection{};
+            motionDetection.reset();
             portEXIT_CRITICAL(&sensorStateMux);
             voiceDetection.begin(config::MIC_ADC_PIN);
             vibrateDetection.begin(config::MMA_X_PIN, config::MMA_Y_PIN, config::MMA_Z_PIN, config::MMA_SLEEP_PIN);
@@ -156,11 +163,9 @@ static void adcReaderTask(void*) {
 }
 
 static void printShot(const ShotEvent& shot) {
-    // 输出融合事件摘要，便于不连接上位机时通过串口检查检测结果。
-    Serial.printf("SHOT #%lu voice[p2p=%u rms=%.1f] vibration[peak=%.1f jerk=%.1f sat=%s] ",
-                  static_cast<unsigned long>(shot.shotCount), shot.voice.peakToPeak,
-                  shot.voice.rms, shot.vibration.peakMagnitude, shot.vibration.peakJerk,
-                  shot.vibration.saturated ? "yes" : "no");
+    Serial.printf("SHOT #%lu source[horizontal_motion] peak[%.1f] energy[%.0f,%.0f,%.0f] ",
+                  static_cast<unsigned long>(shot.shotCount), shot.motion.peak,
+                  shot.motion.energyX, shot.motion.energyY, shot.motion.energyZ);
     if (shot.gps.valid) {
         Serial.printf("gps[%.7f,%.7f age=%lums]\n", shot.gps.latitude, shot.gps.longitude,
                       static_cast<unsigned long>(shot.gps.ageMs));
@@ -194,13 +199,16 @@ void setup() {
 }
 
 void loop() {
-    // 统一使用微秒时钟驱动传感器采样和事件融合，毫秒时钟用于联网周期任务。
+    // 微秒时钟驱动采样和动作识别，毫秒时钟用于联网周期任务。
     const uint64_t nowUs = esp_timer_get_time();
     const uint32_t nowMs = millis();
     if (wifiTransport.uploadOnly()) {
         wifiTransport.update(nowMs);
         pauseSampling.store(true);
         shotDetector.clearPending();
+        portENTER_CRITICAL(&sensorStateMux);
+        motionDetection.reset();
+        portEXIT_CRITICAL(&sensorStateMux);
         gps.setEnabled(false);
         lowPowerMode = false;
         stationarySinceUs = 0;
@@ -214,6 +222,7 @@ void loop() {
         if (!adcReaderTaskStarted) {
             voiceDetection = VoiceDetection{};
             vibrateDetection = VibrateDetection{};
+            motionDetection.reset();
             voiceDetection.begin(config::MIC_ADC_PIN);
             vibrateDetection.begin(config::MMA_X_PIN, config::MMA_Y_PIN, config::MMA_Z_PIN, config::MMA_SLEEP_PIN);
         }
@@ -229,6 +238,8 @@ void loop() {
         // DMA setup failsafe: retain the previous timed one-shot sampling path.
         voiceDetection.update(nowUs);
         vibrateDetection.update(nowUs);
+        motionDetection.processSample(vibrateDetection.rawX(), vibrateDetection.rawY(),
+                                      vibrateDetection.rawZ(), nowUs);
     }
     const SensorSnapshot sensors = captureSensorSnapshot();
 
@@ -300,7 +311,6 @@ void loop() {
         Serial.printf("VOICE TRIGGER p2p=%u rms=%.1f rise=%.2f\n", sensors.voiceEvent.peakToPeak,
                       sensors.voiceEvent.rms, sensors.voiceEvent.riseRatio);
         wifiTransport.enqueueVoiceDetection(sensors.voiceEvent, voiceDetectionCount);
-        shotDetector.onVoiceEvent(sensors.voiceEvent);
     }
 
     if (sensors.hasVibrationEvent) {
@@ -309,10 +319,9 @@ void loop() {
                       sensors.vibrationEvent.peakMagnitude, sensors.vibrationEvent.peakJerk,
                       sensors.vibrationEvent.saturated ? "yes" : "no");
         wifiTransport.enqueueVibrationDetection(sensors.vibrationEvent, vibrationDetectionCount);
-        shotDetector.onVibrateEvent(sensors.vibrationEvent);
     }
 
-    shotDetector.update(nowUs);
+    if (sensors.hasMotionEvent) shotDetector.onMotionEvent(sensors.motionEvent);
     const GpsFix fix = gps.currentFix();
     ShotEvent shot;
     if (shotDetector.consumeShot(shot, fix)) {
@@ -334,8 +343,8 @@ void loop() {
     telemetry.tiltValid = sensors.tiltValid;
     telemetry.rollDegrees = sensors.rollDegrees;
     telemetry.pitchDegrees = sensors.pitchDegrees;
-    telemetry.voiceFlag = shotDetector.flag1();
-    telemetry.vibrationFlag = shotDetector.flag2();
+    telemetry.voiceFlag = sensors.hasVoiceEvent;
+    telemetry.vibrationFlag = sensors.hasVibrationEvent;
     telemetry.gpsValid = fix.valid;
     telemetry.latitude = fix.latitude;
     telemetry.longitude = fix.longitude;
@@ -367,8 +376,8 @@ void loop() {
             sensors.micRaw, sensors.micPeakToPeak,
             sensors.micRms, sensors.vibrationReady ? "ready" : "cal",
             sensors.vibrationX, sensors.vibrationY, sensors.vibrationZ,
-            sensors.vibrationMagnitude, sensors.vibrationJerk, shotDetector.flag1(),
-            shotDetector.flag2(), lowPowerMode ? "low" : "normal", fix.valid ? "fix" : "search",
+            sensors.vibrationMagnitude, sensors.vibrationJerk, sensors.hasVoiceEvent,
+            sensors.hasVibrationEvent, lowPowerMode ? "low" : "normal", fix.valid ? "fix" : "search",
             static_cast<unsigned long>(fix.satellites),
             static_cast<unsigned long>(gps.parsedCharacters()),
             wifiTransport.connected() ? "connected" :

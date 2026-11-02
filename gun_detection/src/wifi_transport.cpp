@@ -500,7 +500,7 @@ bool WifiTransport::send(const QueuedEvent& event) {
         const ShotEvent& shot = event.shot;
         length = snprintf(
             payload, sizeof(payload),
-            "{\"type\":\"shot\",\"deviceId\":\"%s\",\"timestamp\":\"%s\","
+            "{\"type\":\"shot\",\"source\":\"horizontal_motion\",\"deviceId\":\"%s\",\"timestamp\":\"%s\","
             "\"timestampValid\":%s,\"bootId\":\"%016llx\",\"shotId\":%lu,\"shotCount\":%lu,\"uptimeUs\":%llu,"
             "\"voiceP2P\":%u,\"voiceRms\":%.1f,\"voiceRiseRatio\":%.2f,"
             "\"accelX\":%u,\"accelY\":%u,\"accelZ\":%u,\"accelPeak\":%.1f,"

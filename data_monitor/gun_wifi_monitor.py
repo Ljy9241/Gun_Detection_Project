@@ -271,7 +271,7 @@ class MonitorWindow(QMainWindow):
 
         connection = QHBoxLayout()
         connection.addWidget(QLabel("监听地址"))
-        self.host_edit = QLineEdit("10.126.104.83")
+        self.host_edit = QLineEdit("0.0.0.0")
         self.host_edit.setMaximumWidth(150)
         connection.addWidget(self.host_edit)
         connection.addWidget(QLabel("端口"))
@@ -305,7 +305,7 @@ class MonitorWindow(QMainWindow):
         self.values = {}
         fields = [
             ("device", "设备"), ("timestamp", "设备时间戳"),
-            ("rssi", "WiFi 信号"), ("shots", "融合射击次数"),
+            ("rssi", "WiFi 信号"), ("shots", "射击次数（横向动作）"),
             ("detection_counts", "检测次数"),
             ("flags", "检测标志"), ("gps_location", "GPS 定位"),
             ("gps_details", "GPS 信息"), ("storage_test", "Flash 存储"),
@@ -618,15 +618,16 @@ class MonitorWindow(QMainWindow):
             self.accel_plot.setXRange(left, max(HISTORY_SECONDS, elapsed), padding=0)
 
     def handle_shot(self, packet):
-        """更新射击计数和最近一次融合事件摘要。"""
+        """更新射击计数和最近一次动作射击记录，兼容旧固件事件。"""
         shot_id = packet.get("shotId", "?")
         self.shot_count = int(packet.get("shotCount", self.shot_count + 1) or 0)
         self.values["shots"].setText(str(self.shot_count))
         lat, lon = packet.get("latitude"), packet.get("longitude")
         location = f"GPS {self.number(lat, 7)}, {self.number(lon, 7)}" if packet.get("gpsValid") else "GPS 无效"
         timestamp = packet.get("timestamp") if packet.get("timestampValid", False) else "未校准"
+        source = "横向动作" if packet.get("source") == "horizontal_motion" else "声音/振动融合"
         self.values["last_shot"].setText(
-            f"{timestamp}  #{shot_id}  声音 P2P {packet.get('voiceP2P', '—')}  "
+            f"{timestamp}  #{shot_id}  {source}  "
             f"振动峰值 {self.number(packet.get('accelPeak'))}  {location}"
         )
 
