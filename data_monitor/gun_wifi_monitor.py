@@ -311,8 +311,10 @@ class MonitorWindow(QMainWindow):
             ("gps_details", "GPS 信息"), ("storage_test", "Flash 存储"),
             ("mic", "麦克风"), ("accel", "三轴原始值"),
             ("tilt", "静态倾斜角"),
-            ("vibration", "振动量 / 变化量"),
-            ("voice_event", "最近声音事件"), ("vibration_event", "最近振动事件"),
+            # 暂时隐藏振动检测显示，原始三轴数据仍用于绘图和记录。
+            # ("vibration", "振动量 / 变化量"),
+            ("voice_event", "最近声音事件"),
+            # ("vibration_event", "最近振动事件"),
             ("last_shot", "最近射击事件"), ("last_seen", "最近数据"),
         ]
         for index, (key, title) in enumerate(fields):
@@ -322,7 +324,7 @@ class MonitorWindow(QMainWindow):
                 count_layout = QHBoxLayout()
                 for value_key, initial in (
                     ("voice_count", "声音：0 次"),
-                    ("vibration_count", "振动：0 次"),
+                    # ("vibration_count", "振动：0 次"),
                 ):
                     label = QLabel(initial)
                     label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -558,7 +560,8 @@ class MonitorWindow(QMainWindow):
         self.values["rssi"].setText(f"{packet.get('rssi', '—')} dBm")
         self.values["shots"].setText(str(packet.get("shotCount", self.shot_count)))
         self.values["flags"].setText(
-            f"声音：{'触发' if flags.get('voice') else '无'}；振动：{'触发' if flags.get('vibration') else '无'}"
+            f"声音：{'触发' if flags.get('voice') else '无'}"
+            # f"；振动：{'触发' if flags.get('vibration') else '无'}"
         )
         valid = bool(gps.get("valid", False))
         self.values["gps"].setText(f"GPS：{'有效' if valid else '无有效定位'}")
@@ -607,12 +610,12 @@ class MonitorWindow(QMainWindow):
             )
         else:
             self.values["tilt"].setText("校准中或角度无效")
-        self.values["vibration"].setText(
-            f"幅值 {self.number(vibration.get('magnitude'))}   变化 {self.number(vibration.get('jerk'))}"
-        )
+        # self.values["vibration"].setText(
+        #     f"幅值 {self.number(vibration.get('magnitude'))}   变化 {self.number(vibration.get('jerk'))}"
+        # )
         self.shot_count = int(packet.get("shotCount", self.shot_count) or 0)
         self.update_detection_count("voice_count", packet.get("voiceDetectionCount", 0), "声音")
-        self.update_detection_count("vibration_count", packet.get("vibrationDetectionCount", 0), "振动")
+        # self.update_detection_count("vibration_count", packet.get("vibrationDetectionCount", 0), "振动")
         if len(self.x_values) > 1:
             left = max(0.0, elapsed - HISTORY_SECONDS)
             self.accel_plot.setXRange(left, max(HISTORY_SECONDS, elapsed), padding=0)
@@ -628,7 +631,8 @@ class MonitorWindow(QMainWindow):
         source = "横向动作" if packet.get("source") == "horizontal_motion" else "声音/振动融合"
         self.values["last_shot"].setText(
             f"{timestamp}  #{shot_id}  {source}  "
-            f"振动峰值 {self.number(packet.get('accelPeak'))}  {location}"
+            # f"振动峰值 {self.number(packet.get('accelPeak'))}  "
+            f"{location}"
         )
 
     def handle_detection(self, packet):
@@ -646,17 +650,17 @@ class MonitorWindow(QMainWindow):
                 f"声音事件：{timestamp}\n"
                 f"#{count}  {details}"
             )
-        elif detection_type == "vibration":
-            self.update_detection_count("vibration_count", count, "振动")
-            details = (
-                f"峰值 {self.number(packet.get('peakMagnitude'))}，"
-                f"变化 {self.number(packet.get('peakJerk'))}，"
-                f"三轴 {packet.get('x', '—')}/{packet.get('y', '—')}/{packet.get('z', '—')}"
-            )
-            self.values["vibration_event"].setText(
-                f"振动事件：{timestamp}\n"
-                f"#{count}  {details}"
-            )
+        # elif detection_type == "vibration":
+        #     self.update_detection_count("vibration_count", count, "振动")
+        #     details = (
+        #         f"峰值 {self.number(packet.get('peakMagnitude'))}，"
+        #         f"变化 {self.number(packet.get('peakJerk'))}，"
+        #         f"三轴 {packet.get('x', '—')}/{packet.get('y', '—')}/{packet.get('z', '—')}"
+        #     )
+        #     self.values["vibration_event"].setText(
+        #         f"振动事件：{timestamp}\n"
+        #         f"#{count}  {details}"
+        #     )
 
     def update_detection_count(self, key, count, label):
         """避免延迟到达的旧事件包让界面上的累计次数倒退。"""
