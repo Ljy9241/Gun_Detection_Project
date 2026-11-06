@@ -55,7 +55,7 @@ struct SensorSnapshot {
     uint16_t vibrationZ = 0;
     float vibrationMagnitude = 0.0F;
     float vibrationJerk = 0.0F;
-    float sampleDelta = 0.0F;
+    float maxAxisSampleDelta = 0.0F;
     float rollDegrees = 0.0F;
     float pitchDegrees = 0.0F;
     uint32_t voiceDroppedSamples = 0;
@@ -115,7 +115,7 @@ static SensorSnapshot captureSensorSnapshot() {
     snapshot.vibrationZ = vibrateDetection.rawZ();
     snapshot.vibrationMagnitude = vibrateDetection.magnitude();
     snapshot.vibrationJerk = vibrateDetection.jerk();
-    snapshot.sampleDelta = vibrateDetection.sampleDelta();
+    snapshot.maxAxisSampleDelta = vibrateDetection.maxAxisSampleDelta();
     snapshot.tiltValid = vibrateDetection.angleValid();
     snapshot.rollDegrees = vibrateDetection.rollDegrees();
     snapshot.pitchDegrees = vibrateDetection.pitchDegrees();
@@ -244,7 +244,7 @@ void loop() {
     const SensorSnapshot sensors = captureSensorSnapshot();
 
     if (!config::CAPACITY_TEST_MODE && sensors.vibrationReady) {
-        const bool stationary = sensors.sampleDelta <
+        const bool stationary = sensors.maxAxisSampleDelta <=
                                 config::LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS;
         if (!lowPowerMode) {
             if (stationary) {

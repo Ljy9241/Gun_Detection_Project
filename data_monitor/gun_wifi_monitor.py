@@ -313,8 +313,7 @@ class MonitorWindow(QMainWindow):
         fields = [
             ("device", "设备"), ("timestamp", "设备时间戳"),
             ("rssi", "WiFi 信号"), ("shots", "射击次数（横向动作）"),
-            ("detection_counts", "检测次数"),
-            ("flags", "检测标志"), ("gps_location", "GPS 定位"),
+            ("gps_location", "GPS 定位"),
             ("gps_details", "GPS 信息"), ("storage_test", "Flash 存储"),
             ("mic", "麦克风"), ("accel", "三轴原始值"),
             ("tilt", "静态倾斜角"),
@@ -327,18 +326,7 @@ class MonitorWindow(QMainWindow):
         for index, (key, title) in enumerate(fields):
             box = QGroupBox(title)
             layout = QVBoxLayout(box)
-            if key == "detection_counts":
-                count_layout = QHBoxLayout()
-                for value_key, initial in (
-                    ("voice_count", "声音：0 次"),
-                    # ("vibration_count", "振动：0 次"),
-                ):
-                    label = QLabel(initial)
-                    label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                    count_layout.addWidget(label)
-                    self.values[value_key] = label
-                layout.addLayout(count_layout)
-            elif key == "gps_location":
+            if key == "gps_location":
                 gps_location_layout = QHBoxLayout()
                 for value_key, initial in (
                     ("gps", "GPS：—"),
@@ -527,7 +515,6 @@ class MonitorWindow(QMainWindow):
         tilt = packet.get("tilt") or {}
         gps = packet.get("gps") or {}
         storage_test = packet.get("storageTest") or {}
-        flags = packet.get("flags") or {}
         uptime = packet.get("uptimeMs")
         try:
             uptime = float(uptime)
@@ -566,10 +553,7 @@ class MonitorWindow(QMainWindow):
         self.values["device"].setText(str(packet.get("deviceId", "—")))
         self.values["rssi"].setText(f"{packet.get('rssi', '—')} dBm")
         self.values["shots"].setText(str(packet.get("shotCount", self.shot_count)))
-        self.values["flags"].setText(
-            f"声音：{'触发' if flags.get('voice') else '无'}"
-            # f"；振动：{'触发' if flags.get('vibration') else '无'}"
-        )
+
         valid = bool(gps.get("valid", False))
         self.values["gps"].setText(f"GPS：{'有效' if valid else '无有效定位'}")
         self.values["coordinates"].setText(
@@ -673,7 +657,8 @@ class MonitorWindow(QMainWindow):
         """避免延迟到达的旧事件包让界面上的累计次数倒退。"""
         current = self.detection_counts[key]
         self.detection_counts[key] = max(current, int(count or 0))
-        self.values[key].setText(f"{label}：{self.detection_counts[key]} 次")
+        if key in self.values:
+            self.values[key].setText(f"{label}：{self.detection_counts[key]} 次")
 
     def refresh_display(self):
         """由 Qt 定时器批量刷新曲线，并提示数据流中断。"""

@@ -43,14 +43,14 @@ void VibrateDetection::processSample(uint16_t rawX, uint16_t rawY, uint16_t rawZ
     rawY_ = rawY;
     rawZ_ = rawZ;
 
-    // 低功耗静止判断使用相邻采样的三轴向量差，不依赖静止基线。
+    // 低功耗静止判断使用相邻采样中单轴变化绝对值的最大值，不依赖静止基线。
     if (previousRawSampleValid_) {
         const float deltaX = static_cast<float>(rawX_) - previousRawX_;
         const float deltaY = static_cast<float>(rawY_) - previousRawY_;
         const float deltaZ = static_cast<float>(rawZ_) - previousRawZ_;
-        sampleDelta_ = sqrtf(deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ);
+        maxAxisSampleDelta_ = fmaxf(fabsf(deltaX), fmaxf(fabsf(deltaY), fabsf(deltaZ)));
     } else {
-        sampleDelta_ = 0.0F;
+        maxAxisSampleDelta_ = 0.0F;
         previousRawSampleValid_ = true;
     }
     previousRawX_ = rawX_;

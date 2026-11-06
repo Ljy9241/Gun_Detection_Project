@@ -28,7 +28,7 @@ public:
     uint16_t rawZ() const { return rawZ_; }
     float magnitude() const { return magnitude_; }
     float jerk() const { return jerk_; }
-    float sampleDelta() const { return sampleDelta_; }
+    float maxAxisSampleDelta() const { return maxAxisSampleDelta_; }
     bool angleValid() const { return angleValid_; }
     float rollDegrees() const { return rollDegrees_; }
     float pitchDegrees() const { return pitchDegrees_; }
@@ -50,7 +50,7 @@ private:
     uint16_t previousRawX_ = 0;
     uint16_t previousRawY_ = 0;
     uint16_t previousRawZ_ = 0;
-    float sampleDelta_ = 0.0F;
+    float maxAxisSampleDelta_ = 0.0F;
     float baselineX_ = 0.0F;
     float baselineY_ = 0.0F;
     float baselineZ_ = 0.0F;
