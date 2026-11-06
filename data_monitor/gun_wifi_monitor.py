@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pyqtgraph as pg
 from monitor_lib import trajectory_store
+from monitor_lib.discovery import discovery_reply
 from monitor_lib.trajectory_map import TrajectoryMap
 from monitor_lib.transfer_control import TransferControl, decode_records
 from PyQt5.QtCore import QEvent, QObject, QTimer, Qt, pyqtSignal
@@ -65,6 +66,8 @@ class UdpReceiver(QObject):
     def start(self, host, port):
         """停止旧监听后，以指定地址和端口启动新的后台接收线程。"""
         self.stop()
+        if self._thread is not None:
+            self._thread.join()
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._receive_loop, args=(host, port), daemon=True
@@ -119,6 +122,10 @@ class UdpReceiver(QObject):
                         raise
                     break
                 try:
+                    reply = discovery_reply(data)
+                    if reply is not None:
+                        sock.sendto(reply, address)
+                        continue
                     packet = json.loads(data.decode("utf-8-sig").strip())
                     if isinstance(packet, dict):
                         packet["_sender"] = f"{address[0]}:{address[1]}"

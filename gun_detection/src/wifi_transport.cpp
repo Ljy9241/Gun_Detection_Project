@@ -40,9 +40,9 @@ void WifiTransport::begin() {
     bootId_ = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
     if (bootId_ == 0) bootId_ = 1;
     spool_.begin(config::CAPACITY_TEST_MODE);
-    enabled_ = config::WIFI_SSID[0] != '\0' && config::UPPER_COMPUTER_HOST[0] != '\0';
+    enabled_ = config::WIFI_SSID[0] != '\0';
     if (!enabled_) {
-        Serial.println("Wi-Fi upload disabled: configure WIFI_SSID and UPPER_COMPUTER_HOST.");
+        Serial.println("Wi-Fi upload disabled: configure WIFI_SSID.");
         return;
     }
     WiFi.mode(WIFI_STA);
@@ -51,8 +51,9 @@ void WifiTransport::begin() {
     WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
     radioEnabled_ = true;
     lastConnectAttemptMs_ = millis();
-    Serial.printf("Wi-Fi connecting: ssid=%s, UDP target=%s:%u\n", config::WIFI_SSID,
-                  config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT);
+    resetDiscovery(millis());
+    Serial.printf("Wi-Fi connecting: ssid=%s, discovery port=%u\n",
+                  config::WIFI_SSID, config::MONITOR_DISCOVERY_PORT);
 }
 
 void WifiTransport::setTelemetry(const WifiTelemetry& telemetry) {
@@ -150,6 +151,7 @@ void WifiTransport::update(uint32_t nowMs) {
             wasConnected_ = false;
             Serial.println("Low-power Wi-Fi window started.");
         } else {
+            resetDiscovery(nowMs);
             udp_.stop();
             ackListenerStarted_ = false;
             WiFi.disconnect();
@@ -169,6 +171,7 @@ void WifiTransport::update(uint32_t nowMs) {
     if (isConnected != wasConnected_) {
         wasConnected_ = isConnected;
         if (isConnected) {
+            resetDiscovery(nowMs);
             // NTP 使用 UTC 校准系统时钟；时间戳格式化时再转换为北京时间。
             configTime(0, 0, config::NTP_SERVER);
             Serial.printf("NTP time synchronization started: %s\n", config::NTP_SERVER);
@@ -176,10 +179,10 @@ void WifiTransport::update(uint32_t nowMs) {
             if (!ackListenerStarted_) {
                 Serial.printf("UDP ACK listener failed on port %u.\n", config::DEVICE_UDP_PORT);
             }
-            Serial.printf("Wi-Fi connected: local=%s, UDP target=%s:%u\n",
-                          WiFi.localIP().toString().c_str(), config::UPPER_COMPUTER_HOST,
-                          config::UPPER_COMPUTER_PORT);
+            Serial.printf("Wi-Fi connected: local=%s; discovering monitor.\n",
+                          WiFi.localIP().toString().c_str());
         } else {
+            resetDiscovery(nowMs);
             udp_.stop();
             ackListenerStarted_ = false;
             Serial.println("Wi-Fi disconnected; UDP upload paused.");
@@ -202,7 +205,9 @@ void WifiTransport::update(uint32_t nowMs) {
         if (!ackListenerStarted_) return;
     }
 
+    updateDiscovery(nowMs);
     receiveAcknowledgements();
+    if (!monitorDiscovered_) return;
     const bool capacityTestUploadEnabled = uploadOnly_ || !spool_.capacityTestMode() || spool_.capacityTestFull();
     if (capacityTestUploadEnabled &&
         (!recordInFlight_ || nowMs - lastRecordSendMs_ >= config::UDP_TELEMETRY_RETRY_INTERVAL_MS)) {
@@ -219,8 +224,8 @@ void WifiTransport::update(uint32_t nowMs) {
                 if (nowMs - lastSendErrorLogMs_ >= 1000) {
                     lastSendErrorLogMs_ = nowMs;
                     Serial.printf("UDP telemetry batch send failed: records=%u target=%s:%u\n",
-                                  static_cast<unsigned>(count), config::UPPER_COMPUTER_HOST,
-                                  config::UPPER_COMPUTER_PORT);
+                                  static_cast<unsigned>(count), monitorIp_.toString().c_str(),
+                                  monitorPort_);
                 }
             }
         }
@@ -281,10 +286,41 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
 
     const int suffixLength = snprintf(payload + length, sizeof(payload) - static_cast<size_t>(length), "]}");
     if (suffixLength <= 0 || static_cast<size_t>(suffixLength) >= sizeof(payload) - static_cast<size_t>(length) ||
-        !udp_.beginPacket(config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT)) return false;
+        !udp_.beginPacket(monitorIp_, monitorPort_)) return false;
     length += suffixLength;
     udp_.write(reinterpret_cast<const uint8_t*>(payload), length);
     return udp_.endPacket() == 1;
+}
+
+void WifiTransport::resetDiscovery(uint32_t nowMs) {
+    monitorDiscovered_ = false;
+    discoveryNonce_ = 0;
+    recordInFlight_ = false;  // Flash records remain pending until a valid ACK.
+    inFlightCount_ = 0;
+    lastDiscoveryMs_ = nowMs - config::MONITOR_DISCOVERY_INTERVAL_MS;
+}
+
+void WifiTransport::updateDiscovery(uint32_t nowMs) {
+    if (monitorDiscovered_ && nowMs - lastMonitorReplyMs_ >= config::MONITOR_DISCOVERY_TIMEOUT_MS) {
+        resetDiscovery(nowMs);
+        Serial.println("Monitor discovery lease expired; searching again.");
+    }
+    if (nowMs - lastDiscoveryMs_ < config::MONITOR_DISCOVERY_INTERVAL_MS) return;
+    lastDiscoveryMs_ = nowMs;
+    discoveryNonce_ = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
+    if (!discoveryNonce_) discoveryNonce_ = 1;
+    char request[64];
+    const int length = snprintf(request, sizeof(request), "GUN_MONITOR_DISCOVER_V1 %016llx",
+                                static_cast<unsigned long long>(discoveryNonce_));
+    // Directed subnet broadcast works without knowing the computer's address.
+    const IPAddress local = WiFi.localIP();
+    const IPAddress mask = WiFi.subnetMask();
+    IPAddress broadcast;
+    for (uint8_t i = 0; i < 4; ++i) broadcast[i] = local[i] | static_cast<uint8_t>(~mask[i]);
+    if (udp_.beginPacket(broadcast, config::MONITOR_DISCOVERY_PORT)) {
+        udp_.write(reinterpret_cast<const uint8_t*>(request), length);
+        udp_.endPacket();
+    }
 }
 
 void WifiTransport::receiveAcknowledgements() {
@@ -293,6 +329,25 @@ void WifiTransport::receiveAcknowledgements() {
         const int length = udp_.read(reinterpret_cast<uint8_t*>(payload), sizeof(payload) - 1);
         if (length <= 0) continue;
         payload[length] = '\0';
+        char expected[64];
+        snprintf(expected, sizeof(expected), "GUN_MONITOR_HERE_V1 %016llx",
+                 static_cast<unsigned long long>(discoveryNonce_));
+        if (discoveryNonce_ && length == static_cast<int>(strlen(expected)) &&
+            strcmp(payload, expected) == 0 && udp_.remotePort() == config::MONITOR_DISCOVERY_PORT) {
+            if (!monitorDiscovered_ || (udp_.remoteIP() == monitorIp_ && udp_.remotePort() == monitorPort_)) {
+                if (!monitorDiscovered_) {
+                    monitorIp_ = udp_.remoteIP();
+                    monitorPort_ = udp_.remotePort();
+                    monitorDiscovered_ = true;
+                    lastStatusMs_ = millis() - config::UDP_STATUS_INTERVAL_MS;
+                    Serial.printf("Monitor discovered: %s:%u\n", monitorIp_.toString().c_str(), monitorPort_);
+                }
+                lastMonitorReplyMs_ = millis();
+            }
+            continue;
+        }
+        // Ignore ACKs and control messages from old or unrelated endpoints.
+        if (!monitorDiscovered_ || udp_.remoteIP() != monitorIp_ || udp_.remotePort() != monitorPort_) continue;
         char prefix[160];
         snprintf(prefix, sizeof(prefix),
                  "{\"type\":\"set_mode\",\"deviceId\":\"%s\",\"bootId\":\"%016llx\",\"requestId\":",
@@ -419,18 +474,18 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         static_cast<unsigned long>(telemetry_.vibrationDroppedSamples));
 
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(payload) ||
-        !udp_.beginPacket(config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT)) {
+        !udp_.beginPacket(monitorIp_, monitorPort_)) {
         ++failedSends_;
-        Serial.printf("UDP STATUS failed -> %s:%u\n", config::UPPER_COMPUTER_HOST,
-                      config::UPPER_COMPUTER_PORT);
+        Serial.printf("UDP STATUS failed -> %s:%u\n", monitorIp_.toString().c_str(),
+                      monitorPort_);
         return false;
     }
 
     udp_.write(reinterpret_cast<const uint8_t*>(payload), length);
     if (udp_.endPacket() != 1) {
         ++failedSends_;
-        Serial.printf("UDP STATUS failed -> %s:%u\n", config::UPPER_COMPUTER_HOST,
-                      config::UPPER_COMPUTER_PORT);
+        Serial.printf("UDP STATUS failed -> %s:%u\n", monitorIp_.toString().c_str(),
+                      monitorPort_);
         return false;
     }
 
@@ -545,13 +600,13 @@ bool WifiTransport::send(const QueuedEvent& event) {
         return false;
     }
 
-    if (!udp_.beginPacket(config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT)) {
+    if (!udp_.beginPacket(monitorIp_, monitorPort_)) {
         ++failedSends_;
         const uint32_t nowMs = millis();
         if (nowMs - lastSendErrorLogMs_ >= 1000) {
             lastSendErrorLogMs_ = nowMs;
             Serial.printf("UDP TX failed: beginPacket %s:%u, event type=%u\n",
-                          config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT,
+                          monitorIp_.toString().c_str(), monitorPort_,
                           static_cast<unsigned>(event.type));
         }
         return false;
@@ -563,14 +618,14 @@ bool WifiTransport::send(const QueuedEvent& event) {
         if (nowMs - lastSendErrorLogMs_ >= 1000) {
             lastSendErrorLogMs_ = nowMs;
             Serial.printf("UDP TX failed: endPacket %s:%u, event type=%u\n",
-                          config::UPPER_COMPUTER_HOST, config::UPPER_COMPUTER_PORT,
+                          monitorIp_.toString().c_str(), monitorPort_,
                           static_cast<unsigned>(event.type));
         }
         return false;
     }
 
     ++sentEvents_;
-    Serial.printf("UDP TX OK -> %s:%u bytes=%d: %s\n", config::UPPER_COMPUTER_HOST,
-                  config::UPPER_COMPUTER_PORT, length, payload);
+    Serial.printf("UDP TX OK -> %s:%u bytes=%d: %s\n", monitorIp_.toString().c_str(),
+                  monitorPort_, length, payload);
     return true;
 }

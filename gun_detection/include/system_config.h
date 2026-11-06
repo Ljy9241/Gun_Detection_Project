@@ -45,12 +45,12 @@ inline constexpr uint32_t VIBRATE_RETRIGGER_US = 50000;
 
 // 射击记录改由横向动作触发；方向识别阈值在 motion_direction.h 中配置。
 
-// Wi-Fi 与上位机配置；进行网络联调前请填写实际热点和电脑地址。
+// Wi-Fi 热点配置；电脑地址通过局域网 UDP 自动发现。
 inline constexpr char WIFI_SSID[] = "ljy";
 inline constexpr char WIFI_PASSWORD[] = "zxcvbnm1";
-// 此处填写电脑无线网卡的 IPv4 地址，不要填写手机热点网关地址。
-inline constexpr char UPPER_COMPUTER_HOST[] = "10.239.22.83";
-inline constexpr uint16_t UPPER_COMPUTER_PORT = 8888;
+inline constexpr uint16_t MONITOR_DISCOVERY_PORT = 8888; // 必须与上位机监听端口一致，无需配置电脑 IP。
+inline constexpr uint32_t MONITOR_DISCOVERY_INTERVAL_MS = 2000;
+inline constexpr uint32_t MONITOR_DISCOVERY_TIMEOUT_MS = 8000;
 inline constexpr uint16_t DEVICE_UDP_PORT = 8889;  // 接收电脑端入库确认（ACK）。
 inline constexpr char NTP_SERVER[] = "pool.ntp.org";
 inline constexpr char DEVICE_ID[] = "gun_dection";
@@ -60,12 +60,12 @@ inline constexpr uint8_t TELEMETRY_FLASH_BATCH_RECORDS = 20;      // RAM 累积 
 inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 250;           // UDP 状态包每秒发送 4 次；降低主循环及 LittleFS 状态查询负担。
 inline constexpr uint32_t UDP_EVENT_RETRY_INTERVAL_MS = 100;      // 发送失败的事件至少间隔 100 毫秒重试，避免 UDP 错误时忙循环。
 inline constexpr uint32_t UDP_TELEMETRY_RETRY_INTERVAL_MS = 500;  // 遥测批次失败或等待 ACK 时的重试间隔，单位：毫秒。
-inline constexpr float LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS = 3000.0F; // 相邻三轴样本向量差低于此值视为静止，单位：ADC counts。
+inline constexpr float LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS = 50.0F; // 相邻三轴样本向量差低于此值视为静止，单位：ADC counts。
 inline constexpr uint32_t LOW_POWER_STILLNESS_MS = 5000;              // 静止持续此时长后进入低功耗，单位：毫秒。
 inline constexpr uint32_t LOW_POWER_TELEMETRY_INTERVAL_MS = 10000;    // 低功耗期间两条遥测记录的写入间隔，单位：毫秒。
 inline constexpr uint32_t LOW_POWER_GPS_CYCLE_MS = 600000;            // GPS 重复启动周期，单位：毫秒（10 分钟）。
 inline constexpr uint32_t LOW_POWER_GPS_WINDOW_MS = 180000;            // GPS 未取得有效定位时的最长工作时间，单位：毫秒（3 分钟）。
-inline constexpr uint32_t LOW_POWER_GPS_POST_FIX_HOLD_MS = 30000;      // GPS 首次取得有效定位后继续开启的时长，单位：毫秒（30 秒）。
+inline constexpr uint32_t LOW_POWER_GPS_POST_FIX_HOLD_MS = 15000;      // GPS 首次取得有效定位后继续开启的时长，单位：毫秒（30 秒）。
 inline constexpr bool LOW_POWER_WIFI_CYCLE_ENABLED = false;           // false：低功耗期间关闭 Wi-Fi；true：按下方周期和窗口定时开启。
 inline constexpr uint32_t LOW_POWER_WIFI_CYCLE_MS = 600000;           // WiFi 重复连接周期，单位：毫秒（10 分钟）。
 inline constexpr uint32_t LOW_POWER_WIFI_WINDOW_MS = 300000;           // 每个周期内 WiFi 保持开启的时长，单位：毫秒（5 分钟）。

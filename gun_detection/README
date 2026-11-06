@@ -28,7 +28,7 @@
 硬件或网络联调前，请编辑 `include/system_config.h`：
 
 - 根据串口输出校准声音和振动检测阈值。
-- 设置 `WIFI_SSID`、`WIFI_PASSWORD`、`UPPER_COMPUTER_HOST` 和上位机端口。
+- 设置 `WIFI_SSID`、`WIFI_PASSWORD`；电脑 IP 通过局域网自动发现。上位机监听 `0.0.0.0:8888`，端口与 `MONITOR_DISCOVERY_PORT` 一致。电脑换 IP 后会重新发现，无需重新烧录；Wi-Fi 关闭时等待恢复联网。
 - 如需更换 NTP 服务，设置 `NTP_SERVER`。
 - 确认 GPS 波特率，以及 EN 引脚是否为高电平使能。
 

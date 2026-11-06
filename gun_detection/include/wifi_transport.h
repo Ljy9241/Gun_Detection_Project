@@ -82,8 +82,16 @@ private:
     bool sendStatus(uint32_t nowMs);
     bool sendTelemetryBatch(const TelemetryRecord* records, size_t count);
     void receiveAcknowledgements();
+    void updateDiscovery(uint32_t nowMs);
+    void resetDiscovery(uint32_t nowMs);
 
     WiFiUDP udp_;
+    IPAddress monitorIp_;
+    uint16_t monitorPort_ = 0;
+    uint64_t discoveryNonce_ = 0;
+    uint32_t lastDiscoveryMs_ = 0;
+    uint32_t lastMonitorReplyMs_ = 0;
+    bool monitorDiscovered_ = false;
     TelemetrySpool spool_;
     QueuedEvent queue_[QUEUE_SIZE];
     uint8_t head_ = 0;  // 下一个写入位置。
