@@ -7,6 +7,7 @@
 #include "shot_detector.h"
 #include "system_config.h"
 #include "telemetry_spool.h"
+#include "normal_wifi_window.h"
 
 // 定时状态包所需的传感器快照和运行统计。
 struct WifiTelemetry {
@@ -47,6 +48,7 @@ public:
     void begin();
     void setTelemetry(const WifiTelemetry& telemetry);
     void setLowPowerMode(bool enabled, uint32_t nowMs);
+    void onMotionDirection(MotionDirection direction, uint32_t nowMs);
     void update(uint32_t nowMs);
     bool enqueue(const ShotEvent& event);
     bool enqueueVoiceDetection(const VoiceEvent& event, uint32_t detectionCount);
@@ -86,6 +88,7 @@ private:
     void resetDiscovery(uint32_t nowMs);
 
     WiFiUDP udp_;
+    NormalWifiWindow normalWifiWindow_;
     IPAddress monitorIp_;
     uint16_t monitorPort_ = 0;
     uint64_t discoveryNonce_ = 0;

@@ -321,7 +321,10 @@ void loop() {
         wifiTransport.enqueueVibrationDetection(sensors.vibrationEvent, vibrationDetectionCount);
     }
 
-    if (sensors.hasMotionEvent) shotDetector.onMotionEvent(sensors.motionEvent);
+    if (sensors.hasMotionEvent) {
+        wifiTransport.onMotionDirection(sensors.motionEvent.direction, nowMs);
+        shotDetector.onMotionEvent(sensors.motionEvent);
+    }
     const GpsFix fix = gps.currentFix();
     ShotEvent shot;
     if (shotDetector.consumeShot(shot, fix)) {

@@ -45,6 +45,11 @@ void WifiTransport::begin() {
         Serial.println("Wi-Fi upload disabled: configure WIFI_SSID.");
         return;
     }
+    if (!config::NORMAL_WIFI_ALWAYS_ON) {
+        WiFi.mode(WIFI_OFF);
+        Serial.println("Normal Wi-Fi off; waiting for vertical motion.");
+        return;
+    }
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(!uploadOnly_);
     WiFi.setAutoReconnect(true);
@@ -54,6 +59,13 @@ void WifiTransport::begin() {
     resetDiscovery(millis());
     Serial.printf("Wi-Fi connecting: ssid=%s, discovery port=%u\n",
                   config::WIFI_SSID, config::MONITOR_DISCOVERY_PORT);
+}
+
+void WifiTransport::onMotionDirection(MotionDirection direction, uint32_t nowMs) {
+    if (!enabled_ || !normalWifiWindow_.request(direction, config::NORMAL_WIFI_ALWAYS_ON,
+                                                lowPowerMode_, uploadOnly_, nowMs)) return;
+    Serial.printf("Vertical motion: Wi-Fi requested, hold %lu ms after connection.\n",
+                  static_cast<unsigned long>(config::NORMAL_WIFI_HOLD_MS));
 }
 
 void WifiTransport::setTelemetry(const WifiTelemetry& telemetry) {
@@ -132,24 +144,29 @@ void WifiTransport::update(uint32_t nowMs) {
         telemetryWritesPerSecond_ = telemetryWritesTotal_ - lastSpoolRateTotal_;
         lastSpoolRateTotal_ = telemetryWritesTotal_;
     }
-    bool radioShouldBeOn = enabled_;
+    // 已由普通模式开启的窗口持续到期，即使设备随后因静止转入低功耗。
+    const bool gestureWifi = normalWifiWindow_.active() && normalWifiWindow_.update(
+        nowMs, WiFi.status() == WL_CONNECTED, config::NORMAL_WIFI_HOLD_MS,
+        config::NORMAL_WIFI_CONNECT_TIMEOUT_MS);
+    bool radioShouldBeOn = enabled_ && (uploadOnly_ || config::NORMAL_WIFI_ALWAYS_ON || gestureWifi);
     if (enabled_ && lowPowerMode_ && !uploadOnly_) {
         if (!config::LOW_POWER_WIFI_CYCLE_ENABLED) {
-            radioShouldBeOn = false;
+            radioShouldBeOn = gestureWifi;
         } else {
             const uint32_t phaseMs = (nowMs - lowPowerCycleStartMs_) % config::LOW_POWER_WIFI_CYCLE_MS;
-            radioShouldBeOn = phaseMs < config::LOW_POWER_WIFI_WINDOW_MS;
+            radioShouldBeOn = gestureWifi || phaseMs < config::LOW_POWER_WIFI_WINDOW_MS;
         }
     }
     if (radioShouldBeOn != radioEnabled_) {
         if (radioShouldBeOn) {
             WiFi.mode(WIFI_STA);
+            WiFi.setAutoReconnect(true);
             WiFi.setSleep(!uploadOnly_);
             WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
             lastConnectAttemptMs_ = nowMs;
             radioEnabled_ = true;
             wasConnected_ = false;
-            Serial.println("Low-power Wi-Fi window started.");
+            Serial.println("Wi-Fi connection window started.");
         } else {
             resetDiscovery(nowMs);
             udp_.stop();
@@ -158,9 +175,7 @@ void WifiTransport::update(uint32_t nowMs) {
             WiFi.mode(WIFI_OFF);
             radioEnabled_ = false;
             wasConnected_ = false;
-            Serial.println(config::LOW_POWER_WIFI_CYCLE_ENABLED
-                               ? "Low-power Wi-Fi window ended; unacknowledged data retained."
-                               : "Low-power Wi-Fi disabled; unacknowledged data retained.");
+            Serial.println("Wi-Fi off; unacknowledged data retained.");
         }
     }
     if (!enabled_ || !radioEnabled_) {
@@ -362,6 +377,7 @@ void WifiTransport::receiveAcknowledgements() {
                     controlId_ = id;
                     if (on && !uploadOnly_) uploadTotal_ = spool_.pendingCount() + pendingFlashRecordCount_;
                     uploadOnly_ = on;
+                    normalWifiWindow_.cancel();
                     lowPowerMode_ = false;
                     WiFi.setSleep(!uploadOnly_);
                     lastSpoolMs_ = millis();
