@@ -64,8 +64,9 @@ void WifiTransport::begin() {
 void WifiTransport::onMotionDirection(MotionDirection direction, uint32_t nowMs) {
     if (!enabled_ || !normalWifiWindow_.request(direction, config::NORMAL_WIFI_ALWAYS_ON,
                                                 lowPowerMode_, uploadOnly_, nowMs)) return;
-    Serial.printf("Vertical motion: Wi-Fi requested, hold %lu ms after connection.\n",
-                  static_cast<unsigned long>(config::NORMAL_WIFI_HOLD_MS));
+    gestureWifiHoldMs_ = lowPowerMode_ ? config::LOW_POWER_VERTICAL_WIFI_HOLD_MS : config::NORMAL_WIFI_HOLD_MS;
+    Serial.printf("Vertical motion (%s): Wi-Fi requested, hold %lu ms after connection.\n",
+                  lowPowerMode_ ? "low power" : "normal", static_cast<unsigned long>(gestureWifiHoldMs_));
 }
 
 void WifiTransport::setTelemetry(const WifiTelemetry& telemetry) {
@@ -85,7 +86,7 @@ void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
         lastSpoolMs_ = nowMs;
         Serial.printf("LOW_POWER_ENTER: telemetry interval=%lus, Wi-Fi %s",
                       static_cast<unsigned long>(config::LOW_POWER_TELEMETRY_INTERVAL_MS / 1000U),
-                      config::LOW_POWER_WIFI_CYCLE_ENABLED ? "cycle " : "disabled.\n");
+                      config::LOW_POWER_WIFI_CYCLE_ENABLED ? "cycle " : "on vertical motion.\n");
         if (config::LOW_POWER_WIFI_CYCLE_ENABLED) {
             Serial.printf("window=%lus/%lus.\n",
                           static_cast<unsigned long>(config::LOW_POWER_WIFI_WINDOW_MS / 1000U),
@@ -146,7 +147,7 @@ void WifiTransport::update(uint32_t nowMs) {
     }
     // 已由普通模式开启的窗口持续到期，即使设备随后因静止转入低功耗。
     const bool gestureWifi = normalWifiWindow_.active() && normalWifiWindow_.update(
-        nowMs, WiFi.status() == WL_CONNECTED, config::NORMAL_WIFI_HOLD_MS,
+        nowMs, WiFi.status() == WL_CONNECTED, gestureWifiHoldMs_,
         config::NORMAL_WIFI_CONNECT_TIMEOUT_MS);
     bool radioShouldBeOn = enabled_ && (uploadOnly_ || config::NORMAL_WIFI_ALWAYS_ON || gestureWifi);
     if (enabled_ && lowPowerMode_ && !uploadOnly_) {
@@ -437,7 +438,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         "\"tilt\":{\"valid\":%s,\"rollDeg\":%.1f,\"pitchDeg\":%.1f},"
         "\"flags\":{\"voice\":%s,\"vibration\":%s},"
         "\"shotCount\":%lu,\"voiceDetectionCount\":%lu,"
-        "\"vibrationDetectionCount\":%lu,\"sentShots\":%lu,"
+        "\"vibrationDetectionCount\":%lu,\"verticalMotionCount\":%lu,\"sentShots\":%lu,"
         "\"udp\":{\"queued\":%u,\"failed\":%lu,\"dropped\":%lu},"
         "\"gps\":{\"valid\":%s,\"latitude\":%.7f,\"longitude\":%.7f,"
         "\"altitudeM\":%.1f,\"speedKmph\":%.1f,\"hdop\":%.1f,"
@@ -467,6 +468,7 @@ bool WifiTransport::sendStatus(uint32_t nowMs) {
         static_cast<unsigned long>(telemetry_.shotCount),
         static_cast<unsigned long>(telemetry_.voiceDetectionCount),
         static_cast<unsigned long>(telemetry_.vibrationDetectionCount),
+        static_cast<unsigned long>(telemetry_.verticalMotionCount),
         static_cast<unsigned long>(sentEvents_), count_,
         static_cast<unsigned long>(failedSends_),
         static_cast<unsigned long>(droppedEvents_),

@@ -313,6 +313,7 @@ class MonitorWindow(QMainWindow):
         fields = [
             ("device", "设备"), ("timestamp", "设备时间戳"),
             ("rssi", "WiFi 信号"), ("shots", "射击次数（横向动作）"),
+            ("vertical_motion_count", "竖向动作检测次数"),
             ("gps_location", "GPS 定位"),
             ("gps_details", "GPS 信息"), ("storage_test", "Flash 存储"),
             ("mic", "麦克风"), ("accel", "三轴原始值"),
@@ -446,6 +447,8 @@ class MonitorWindow(QMainWindow):
             f"{packet.get('_sender', '')}  [{kind}]"
         )
         if kind == "status":
+            # 设备累计值；重复状态包不重复计数，旧固件无此字段时显示占位符。
+            self.values["vertical_motion_count"].setText(str(packet.get("verticalMotionCount", "—")))
             self.transfer.observe(packet)
             self.refresh_transfer()
             if packet.get('uploadOnly'):

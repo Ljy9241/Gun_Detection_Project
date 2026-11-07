@@ -30,6 +30,7 @@ public:
     void processSample(uint16_t x, uint16_t y, uint16_t z, uint64_t nowUs);
     bool consumeEvent(MotionEvent& event);
     bool calibrated() const { return calibrated_; }
+    bool classifying() const { return candidate_ || active_; }
 private:
     struct CalibrationSample { uint64_t time; float a[3]; };
     CalibrationSample calibration_[48] = {};

@@ -38,6 +38,7 @@ struct WifiTelemetry {
     uint32_t shotCount = 0;
     uint32_t voiceDetectionCount = 0;
     uint32_t vibrationDetectionCount = 0;
+    uint32_t verticalMotionCount = 0;
     uint32_t voiceDroppedSamples = 0;
     uint32_t vibrationDroppedSamples = 0;
 };
@@ -89,6 +90,7 @@ private:
 
     WiFiUDP udp_;
     NormalWifiWindow normalWifiWindow_;
+    uint32_t gestureWifiHoldMs_ = config::NORMAL_WIFI_HOLD_MS;
     IPAddress monitorIp_;
     uint16_t monitorPort_ = 0;
     uint64_t discoveryNonce_ = 0;

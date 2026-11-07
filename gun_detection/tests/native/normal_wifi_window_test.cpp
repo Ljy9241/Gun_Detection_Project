@@ -1,5 +1,7 @@
 #include "normal_wifi_window.h"
+#include "low_power_motion_wake.h"
 #include <cassert>
+#include <initializer_list>
 
 int main() {
     NormalWifiWindow w;
@@ -7,7 +9,19 @@ int main() {
     auto tick = [&](uint32_t t, bool connected) { return w.update(t, connected, 120000, 60000); };
     assert(!w.active());
     assert(!w.request(MotionDirection::Vertical, true, false, false, 0));
-    assert(!w.request(MotionDirection::Vertical, false, true, false, 0));
+    for (bool alwaysOn : {false, true}) {
+        LowPowerMotionWake gate;
+        MotionEvent e; e.direction = MotionDirection::Vertical;
+        assert(!gate.shouldExit(1000, true, false, nullptr));
+        assert(!gate.shouldExit(901000, false, true, nullptr));
+        assert(!gate.shouldExit(1601000, false, false, &e));
+        assert(w.request(e.direction, alwaysOn, true, false, 0));
+        assert(tick(1000, true) && tick(120999, false) && !tick(121000, false));
+        assert(!gate.shouldExit(2000000, true, false, nullptr));
+        assert(gate.shouldExit(2300000, false, false, nullptr)); // Other motion still wakes.
+        assert(!w.request(MotionDirection::Horizontal, alwaysOn, true, false, 0));
+        assert(!w.request(MotionDirection::Vertical, alwaysOn, true, true, 0));
+    }
     assert(!w.request(MotionDirection::Vertical, false, false, true, 0));
     assert(!w.request(MotionDirection::Horizontal, false, false, false, 0));
     assert(!w.request(MotionDirection::Unknown, false, false, false, 0));

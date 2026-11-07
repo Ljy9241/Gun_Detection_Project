@@ -7,6 +7,7 @@
 #include "adc_sampler.h"
 #include "gps_manager.h"
 #include "shot_detector.h"
+#include "low_power_motion_wake.h"
 #include "system_config.h"
 #include "vibrate_detection.h"
 #include "voice_detection.h"
@@ -34,7 +35,9 @@ uint8_t pendingAdcMask = 0;
 uint32_t lastDiagnosticMs = 0;
 uint32_t voiceDetectionCount = 0;
 uint32_t vibrationDetectionCount = 0;
+uint32_t verticalMotionCount = 0;  // 本次启动以来识别的完整竖向动作，与联网结果无关。
 bool lowPowerMode = false;
+LowPowerMotionWake lowPowerMotionWake;
 uint64_t stationarySinceUs = 0;
 bool lowPowerGpsWindowActive = false;
 uint32_t lowPowerGpsWindowStartMs = 0;
@@ -45,6 +48,7 @@ uint32_t nextLowPowerGpsStartMs = 0;
 struct SensorSnapshot {
     MotionEvent motionEvent;
     bool hasMotionEvent = false;
+    bool classifyingMotion = false;
     VoiceEvent voiceEvent;
     VibrateEvent vibrationEvent;
     uint16_t micRaw = 0;
@@ -104,6 +108,7 @@ static SensorSnapshot captureSensorSnapshot() {
     SensorSnapshot snapshot;
     portENTER_CRITICAL(&sensorStateMux);
     snapshot.hasMotionEvent = motionDetection.consumeEvent(snapshot.motionEvent);
+    snapshot.classifyingMotion = motionDetection.classifying();
     snapshot.hasVoiceEvent = voiceDetection.consumeEvent(snapshot.voiceEvent);
     snapshot.hasVibrationEvent = vibrateDetection.consumeEvent(snapshot.vibrationEvent);
     snapshot.micRaw = voiceDetection.latestRaw();
@@ -252,6 +257,7 @@ void loop() {
                 if (nowUs - stationarySinceUs >=
                     static_cast<uint64_t>(config::LOW_POWER_STILLNESS_MS) * 1000ULL) {
                     lowPowerMode = true;
+                    lowPowerMotionWake.reset();
                     nextLowPowerGpsStartMs = nowMs;  // 首个 GPS 窗口立即启动。
                     lowPowerGpsWindowActive = false;
                     lowPowerGpsFixHoldActive = false;
@@ -261,7 +267,8 @@ void loop() {
             } else {
                 stationarySinceUs = 0;
             }
-        } else if (!stationary) {
+        } else if (lowPowerMotionWake.shouldExit(nowUs, !stationary, sensors.classifyingMotion,
+                           sensors.hasMotionEvent ? &sensors.motionEvent : nullptr)) {
             lowPowerMode = false;
             stationarySinceUs = 0;
             lowPowerGpsWindowActive = false;
@@ -322,6 +329,7 @@ void loop() {
     }
 
     if (sensors.hasMotionEvent) {
+        if (sensors.motionEvent.direction == MotionDirection::Vertical) ++verticalMotionCount;
         wifiTransport.onMotionDirection(sensors.motionEvent.direction, nowMs);
         shotDetector.onMotionEvent(sensors.motionEvent);
     }
@@ -361,6 +369,7 @@ void loop() {
     telemetry.shotCount = shotDetector.shotCount();
     telemetry.voiceDetectionCount = voiceDetectionCount;
     telemetry.vibrationDetectionCount = vibrationDetectionCount;
+    telemetry.verticalMotionCount = verticalMotionCount;
     telemetry.voiceDroppedSamples = sensors.voiceDroppedSamples;
     telemetry.vibrationDroppedSamples = sensors.vibrationDroppedSamples;
     wifiTransport.setTelemetry(telemetry);

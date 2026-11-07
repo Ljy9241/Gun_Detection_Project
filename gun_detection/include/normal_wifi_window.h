@@ -6,7 +6,7 @@
 class NormalWifiWindow {
 public:
     bool request(MotionDirection direction, bool alwaysOn, bool lowPower, bool uploadOnly, uint32_t now) {
-        if (alwaysOn || lowPower || uploadOnly || direction != MotionDirection::Vertical) return false;
+        if ((!lowPower && alwaysOn) || uploadOnly || direction != MotionDirection::Vertical) return false;
         state_ = Waiting;
         since_ = now;
         return true;
