@@ -9,9 +9,14 @@ public:
         : periodMs_(periodMs), windowMs_(windowMs) {}
     bool startIfDue(uint32_t now) {
         if (active_ || (started_ && now - startMs_ < periodMs_)) return false;
+        startNow(now);
+        return true;
+    }
+    // A transition between continuous and periodic operation begins a fresh
+    // window, so a long continuous session cannot cause an immediate timeout.
+    void startNow(uint32_t now) {
         started_ = active_ = true;
         startMs_ = now;
-        return true;
     }
     bool active() const { return active_; }
     bool timedOut(uint32_t now) const {

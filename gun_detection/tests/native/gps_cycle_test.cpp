@@ -23,6 +23,13 @@ int main() {
     cycle.finish();
     assert(!cycle.startIfDue(5000001));
     assert(cycle.startIfDue(5600000));
+    // Entering/leaving always-on mode starts a fresh timeout and cycle anchor.
+    cycle.startNow(9000000);
+    assert(cycle.active() && !cycle.timedOut(9179999));
+    assert(cycle.timedOut(9180000));
+    cycle.finish();
+    assert(!cycle.startIfDue(9599999));
+    assert(cycle.startIfDue(9600000));
 
     GpsCycle wrap(600000, 180000);
     const uint32_t start = UINT32_MAX - 999;

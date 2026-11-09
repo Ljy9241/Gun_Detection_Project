@@ -41,6 +41,7 @@ bool lowPowerMode = false;
 LowPowerMotionWake lowPowerMotionWake;
 uint64_t stationarySinceUs = 0;
 GpsCycle gpsCycle(config::GPS_CYCLE_MS, config::GPS_WINDOW_MS);
+bool gpsWasAlwaysOn = false;
 bool gpsSnapshotPending = false;
 TelemetryRecord gpsSnapshot;
 uint32_t lastGpsFlashAttemptMs = 0;
@@ -220,6 +221,7 @@ void loop() {
         lowPowerMode = false;
         stationarySinceUs = 0;
         gpsCycle.finish();
+        gpsWasAlwaysOn = false;
         delay(1);
         return;
     }
@@ -273,11 +275,20 @@ void loop() {
         }
     }
 
-    // Motion changes never restart or extend the independent GPS schedule.
-    if (gpsCycle.startIfDue(nowMs)) {
+    const bool gpsAlwaysOn = config::NORMAL_GPS_ALWAYS_ON && !lowPowerMode;
+    if (gpsAlwaysOn != gpsWasAlwaysOn) {
+        // Returning to low power gets a full acquisition window, regardless
+        // of how long GPS was continuously enabled in normal mode.
+        gpsCycle.startNow(nowMs);
+        gps.setEnabled(true);
+        Serial.println(gpsAlwaysOn ? "Normal GPS always-on mode enabled."
+                                   : "GPS returning to periodic mode; new window started.");
+    } else if (gpsCycle.startIfDue(nowMs)) {
         gps.setEnabled(true);
         Serial.println("GPS periodic window started.");
     }
+    gpsWasAlwaysOn = gpsAlwaysOn;
+    if (gpsAlwaysOn) gps.setEnabled(true);
     gps.update();
 
     if (sensors.hasVoiceEvent) {
@@ -359,19 +370,25 @@ void loop() {
         lastGpsFlashAttemptMs = nowMs;
         if (wifiTransport.appendTelemetrySnapshot(gpsSnapshot)) {
             gpsSnapshotPending = false;
-            gps.setEnabled(false);
+            if (!gpsAlwaysOn) gps.setEnabled(false);
             gpsCycle.finish();
-            Serial.println("GPS fix and sensor snapshot saved to Flash; GPS off.");
+            Serial.println(gpsAlwaysOn
+                ? "GPS fix and sensor snapshot saved to Flash; normal GPS remains on."
+                : "GPS fix and sensor snapshot saved to Flash; GPS off.");
         } else {
             Serial.println("GPS snapshot Flash write failed; retaining original snapshot for retry.");
         }
     }
     if (gpsCycle.timedOut(nowMs)) {
-        gps.setEnabled(false);
+        if (!gpsAlwaysOn) gps.setEnabled(false);
         gpsCycle.finish();
-        Serial.println(gpsSnapshotPending
-            ? "GPS 3-minute window ended; snapshot still pending Flash retry; GPS off."
-            : "GPS timed out after 3 minutes without a saved fix; GPS off.");
+        if (gpsAlwaysOn) {
+            Serial.println("GPS snapshot window ended; normal GPS remains on.");
+        } else {
+            Serial.println(gpsSnapshotPending
+                ? "GPS 3-minute window ended; snapshot still pending Flash retry; GPS off."
+                : "GPS timed out after 3 minutes without a saved fix; GPS off.");
+        }
     }
     wifiTransport.update(nowMs);
 
