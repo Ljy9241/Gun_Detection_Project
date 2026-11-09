@@ -559,7 +559,7 @@ void loop() {
     telemetry.vibrationDroppedSamples = sensors.vibrationDroppedSamples;
     wifiTransport.setTelemetry(telemetry);
 
-    if (!config::CAPACITY_TEST_MODE && gpsCycle.active() && fix.valid && !gpsSnapshotPending) {
+    if (!config::CAPACITY_TEST_MODE && !gpsAlwaysOn && gpsCycle.active() && fix.valid && !gpsSnapshotPending) {
         // Copy values under the sensor lock without consuming any new events.
         portENTER_CRITICAL(&sensorStateMux);
         telemetry.micRaw = voiceDetection.latestRaw();

@@ -68,6 +68,8 @@ def store(database, packet, record=None):
     kind = packet.get('type')
     live = kind in ('status', 'shot')
     shot_id = int(record.get('shotId') or 0)
+    if not live and not shot_id and record.get('recordKind', 0) == 1:
+        return  # Sensor-only samples do not create extra trajectory points.
     point_kind = 'shot' if shot_id else 'gps'
     if kind == 'status':
         gps = packet.get('gps') or {}

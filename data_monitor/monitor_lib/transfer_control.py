@@ -4,16 +4,21 @@ import time
 
 FIELDS = ('sequence', 'timestamp', 'accel_x', 'accel_y', 'accel_z', 'mic_raw',
           'mic_p2p', 'mic_rms', 'latitude', 'longitude', 'bootId', 'uptimeMs', 'shotId')
+FIELDS_V2 = FIELDS + ('recordKind',)
 
 
 def decode_records(packet):
     records = packet['records']
     if not isinstance(records, list) or not records or len(records) > 64:
         raise ValueError('批次记录数无效')
-    if packet.get('format') == 'compact-v1':
-        if any(not isinstance(row, list) or len(row) != len(FIELDS) for row in records):
+    if packet.get('format') in ('compact-v1', 'compact-v2'):
+        fields = FIELDS_V2 if packet['format'] == 'compact-v2' else FIELDS
+        if any(not isinstance(row, list) or len(row) != len(fields) for row in records):
             raise ValueError('紧凑遥测字段数无效')
-        return [dict(zip(FIELDS, row)) for row in records]
+        result = [dict(zip(fields, row)) for row in records]
+        if any(r.get('recordKind', 0) not in (0, 1, 2) for r in result):
+            raise ValueError('遥测记录类型无效')
+        return result
     if packet.get('format'):
         raise ValueError('不支持的遥测格式')
     return records

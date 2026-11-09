@@ -84,7 +84,7 @@ void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
     if (enabled) {
         lowPowerCycleStartMs_ = nowMs;  // 启用周期模式时，进入低功耗后立即开始第一个窗口。
         Serial.printf("LOW_POWER_ENTER: telemetry interval=%lus, Wi-Fi %s",
-                      static_cast<unsigned long>(config::LOW_POWER_TELEMETRY_INTERVAL_MS / 1000U),
+                      static_cast<unsigned long>(config::LOW_POWER_SENSOR_RECORD_INTERVAL_MS / 1000U),
                       config::LOW_POWER_WIFI_CYCLE_ENABLED ? "cycle " : "on vertical motion.\n");
         if (config::LOW_POWER_WIFI_CYCLE_ENABLED) {
             Serial.printf("window=%lus/%lus.\n",
@@ -147,7 +147,7 @@ void WifiTransport::setScheduledStandby(bool standby, uint32_t nowMs) {
         radioEnabled_ = false;
         wasConnected_ = false;
     } else {
-        lastSpoolMs_ = nowMs;  // Wait for fresh, resumed sensor samples.
+        recordingSchedule_.reset(nowMs);  // Wait for fresh, resumed sensor samples.
         lastSpoolRateMs_ = nowMs;
         lastSpoolRateTotal_ = telemetryWritesTotal_;
         telemetryWritesPerSecond_ = 0;
@@ -159,16 +159,33 @@ void WifiTransport::setScheduledStandby(bool standby, uint32_t nowMs) {
 void WifiTransport::update(uint32_t nowMs) {
     if (scheduledStandby_) return;
     const uint32_t spoolIntervalMs = lowPowerMode_
-        ? config::LOW_POWER_TELEMETRY_INTERVAL_MS
+        ? config::LOW_POWER_SENSOR_RECORD_INTERVAL_MS
         : config::TELEMETRY_SPOOL_INTERVAL_MS;
-    if (!uploadOnly_ && nowMs - lastSpoolMs_ >= spoolIntervalMs) {
-        lastSpoolMs_ = nowMs;
+    const RecordingSchedule::Due due = recordingSchedule_.poll(
+        nowMs, spoolIntervalMs,
+        !config::CAPACITY_TEST_MODE && !uploadOnly_ && !lowPowerMode_ && config::NORMAL_GPS_ALWAYS_ON,
+        config::NORMAL_GPS_TRACK_INTERVAL_MS);
+    if (!uploadOnly_ && due.sensors) {
         if (!spool_.capacityTestFull()) {
-            const TelemetryRecord record = makeTelemetryRecord(telemetry_);
+            TelemetryRecord record = makeTelemetryRecord(telemetry_);
+            record.recordKind = config::CAPACITY_TEST_MODE ? 0 : 1;
             if (pendingFlashRecordCount_ < config::TELEMETRY_FLASH_BATCH_RECORDS) {
                 pendingFlashRecords_[pendingFlashRecordCount_++] = record;
             }
         }
+    }
+    if (due.track && !spool_.capacityTestFull() &&
+        pendingFlashRecordCount_ < config::TELEMETRY_FLASH_BATCH_RECORDS) {
+        // A GPS-only record never manufactures an extra microphone/ADC sample.
+        TelemetryRecord record;
+        record.bootId = bootId_;
+        record.uptimeMs = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+        formatTimestamp(record.timestamp, sizeof(record.timestamp));
+        record.latitude = telemetry_.latitude;
+        record.longitude = telemetry_.longitude;
+        record.gpsValid = telemetry_.gpsValid ? 1 : 0;
+        record.recordKind = 2;
+        pendingFlashRecords_[pendingFlashRecordCount_++] = record;
     }
     // Daily 10-second records flush immediately in either motion state.
     // Only the high-rate capacity test batches writes.
@@ -309,7 +326,7 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
     // Compact rows amortize durable PC commits over seven records.
     char payload[1472];
     int length = snprintf(payload, sizeof(payload),
-                          "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"format\":\"compact-v1\",\"records\":[",
+                          "{\"type\":\"telemetry_batch\",\"deviceId\":\"%s\",\"format\":\"compact-v2\",\"records\":[",
                           config::DEVICE_ID);
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(payload)) return false;
 
@@ -326,13 +343,13 @@ bool WifiTransport::sendTelemetryBatch(const TelemetryRecord* records, size_t co
         }
         const int written = snprintf(
             payload + length, sizeof(payload) - static_cast<size_t>(length),
-            "%s[%llu,\"%s\",%u,%u,%u,%u,%u,%.3f,%s,%s,\"%016llx\",%llu,%lu]",
+            "%s[%llu,\"%s\",%u,%u,%u,%u,%u,%.3f,%s,%s,\"%016llx\",%llu,%lu,%u]",
             i ? "," : "", static_cast<unsigned long long>(record.sequence), record.timestamp,
             record.accelX, record.accelY, record.accelZ,
             record.micRaw, record.micP2p, record.micRms, latitude, longitude,
             static_cast<unsigned long long>(record.bootId),
             static_cast<unsigned long long>(record.uptimeMs),
-            static_cast<unsigned long>(record.shotId));
+            static_cast<unsigned long>(record.shotId), record.recordKind);
         if (written <= 0 || static_cast<size_t>(written) >= sizeof(payload) - static_cast<size_t>(length)) {
             return false;
         }
@@ -420,7 +437,7 @@ void WifiTransport::receiveAcknowledgements() {
                     normalWifiWindow_.cancel();
                     lowPowerMode_ = false;
                     WiFi.setSleep(!uploadOnly_);
-                    lastSpoolMs_ = millis();
+                    recordingSchedule_.reset(millis());
                 }
                 sendStatus(millis());
             }

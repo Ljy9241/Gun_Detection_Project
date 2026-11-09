@@ -8,6 +8,7 @@
 #include "system_config.h"
 #include "telemetry_spool.h"
 #include "normal_wifi_window.h"
+#include "recording_schedule.h"
 
 // 定时状态包所需的传感器快照和运行统计。
 struct WifiTelemetry {
@@ -111,7 +112,7 @@ private:
     uint32_t lastConnectAttemptMs_ = 0;
     uint32_t lastStatusMs_ = 0;
     uint32_t lastEventSendMs_ = 0;
-    uint32_t lastSpoolMs_ = 0;
+    RecordingSchedule recordingSchedule_;
     uint32_t lastSpoolRateMs_ = 0;
     uint32_t lastSpoolRateTotal_ = 0;
     uint32_t lowPowerCycleStartMs_ = 0;

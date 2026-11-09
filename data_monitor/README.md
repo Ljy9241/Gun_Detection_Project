@@ -20,7 +20,7 @@
 需要 PyQt5、PyQtWebEngine、pyqtgraph；缺少时，在运行程序的同一个 Python 环境中安装：
 
 ```powershell
-python -m pip install PyQt5 PyQtWebEngine pyqtgraph
+python -m pip install PyQt5 PyQtWebEngine pyqtgraph colorama
 ```
 
 高德 Web 端 JS API 的 `key` 和 `securityJsCode` 从本目录的 `amap_config.json` 读取。
@@ -104,3 +104,30 @@ python data_monitor/tests/test_trajectory.py --smoke
 
 高德接入参考：[JS API 加载](https://developer.amap.com/api/javascript-api-v2/guide/abc/load)、
 [安全密钥配置](https://developer.amap.com/api/javascript-api-v2/guide/abc/jscode)。
+
+## 独立轨迹周期和射击数据库
+
+固件新增 `NORMAL_GPS_TRACK_INTERVAL_MS`（默认 1000 ms）、`NORMAL_SENSOR_RECORD_INTERVAL_MS`（默认 10000 ms）、`LOW_POWER_SENSOR_RECORD_INTERVAL_MS`（默认 10000 ms）。普通 GPS 常开时每秒保存独立轨迹，声音/振动按各模式独立周期保存；轨迹记录不会伪造额外的传感器行。低功耗 GPS 周期和夜间待机策略不变。
+
+新固件发送 `compact-v2`，本版上位机同时兼容旧 `compact-v1`。升级时需要同时使用新固件及本版上位机，否则旧上位机无法确认新格式，设备会保留数据待补传。
+
+在原来的 `gun_telemetry.db` 中新增 `shots` 表，只包含四列：
+
+| 字段 | 内容 |
+|---|---|
+| shot_id | 设备本次开机的射击计数：1、2、3……，设备重启后重新从 1 开始，允许重复 |
+| timestamp | 射击时间，北京时间或未校时的 T+ 时间 |
+| latitude | 纬度；无有效定位时为空 |
+| longitude | 经度；无有效定位时为空 |
+
+实时射击、断网后的 Flash 补传和重复 UDP 包会合并为同一次射击。原有 `track_points` 表保留设备、上电标识、设备射击编号等去重信息；`shots` 用 SQLite 隐藏的 `rowid` 关联原轨迹记录，仅保留四个显示字段，不能把可重复的 `shot_id` 当作唯一键。通过数据库触发器，射击表与轨迹、上传确认凭据在同一个事务中提交，成功后才 ACK；写入失败不确认设备记录。
+
+启动监听时自动回填原轨迹中的射击历史；若目录里存在上一步创建的 `gun_shots.db`，会只读导入其中记录到原库，按原设备/上电/射击身份去重。旧文件保留为备份，程序不再向它写入。
+
+可用 SQLite 工具打开原来的 `gun_telemetry.db` 查询：
+
+```sql
+SELECT shot_id, timestamp, latitude, longitude FROM shots ORDER BY rowid;
+```
+
+`ORDER BY rowid` 按记录顺序查看，可以看到每次重启后从 1 开始的新计数段；按 `shot_id` 排序则会把不同开机的相同编号排在一起。旧的全局编号结构会在启动监听时自动迁移为设备计数，既有时间和位置保留。

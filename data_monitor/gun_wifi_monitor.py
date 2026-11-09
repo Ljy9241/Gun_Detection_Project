@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pyqtgraph as pg
-from monitor_lib import trajectory_store
+from monitor_lib import trajectory_store, shot_store
 from monitor_lib.discovery import discovery_reply
 from monitor_lib.trajectory_map import TrajectoryMap
 from monitor_lib.transfer_control import TransferControl, decode_records
@@ -111,6 +111,8 @@ class UdpReceiver(QObject):
             )
             database.commit()
             trajectory_store.initialize(database)
+            shot_store.initialize(database)
+            shot_store.import_legacy_database(database, DATABASE_PATH.with_name("gun_shots.db"))
             self.listening.emit(True, f"监听中：{host}:{port}")
             while not self._stop.is_set():
                 try:
@@ -174,13 +176,14 @@ class UdpReceiver(QObject):
         sequence = int(packet["sequence"])
         # timestampValid 仅表示是否已校准到日历时间；未校时的 T+... 也应保存。
         timestamp = packet.get("timestamp") or None
+        # Shot-table triggers, trajectory and receipts commit together before ACK.
         with database:
             trajectory_store.store(database, packet)
             cursor = database.execute(
                 "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
                 (device_id, sequence),
             )
-            if cursor.rowcount:
+            if cursor.rowcount and not packet.get("shotId") and packet.get("recordKind", 0) != 2:
                 database.execute(
                     "INSERT INTO telemetry(timestamp, accel_x, accel_y, accel_z, "
                     "mic_raw, mic_p2p, mic_rms, latitude, longitude) "
@@ -208,6 +211,7 @@ class UdpReceiver(QObject):
         sequences = []
         new_rows = []
         seen_sequences = set()
+        # Shot-table triggers, trajectory and receipts commit together before ACK.
         with database:
             for record in records:
                 if not isinstance(record, dict):
@@ -222,7 +226,7 @@ class UdpReceiver(QObject):
                     "INSERT OR IGNORE INTO upload_receipts(device_id, sequence) VALUES (?, ?)",
                     (device_id, sequence),
                 )
-                if cursor.rowcount and not record.get("shotId"):
+                if cursor.rowcount and not record.get("shotId") and record.get("recordKind", 0) != 2:
                     # GPS/NTP 尚未校时也保存 T+HH:MM:SS 上电计时。
                     timestamp = record.get("timestamp") or None
                     new_rows.append((
