@@ -50,6 +50,8 @@ public:
     void setTelemetry(const WifiTelemetry& telemetry);
     TelemetryRecord makeTelemetryRecord(const WifiTelemetry& telemetry) const;
     bool appendTelemetrySnapshot(const TelemetryRecord& record);
+    bool flushPendingTelemetry();
+    void setScheduledStandby(bool standby, uint32_t nowMs);
     void setLowPowerMode(bool enabled, uint32_t nowMs);
     void onMotionDirection(MotionDirection direction, uint32_t nowMs);
     void update(uint32_t nowMs);
@@ -62,6 +64,8 @@ public:
     bool radioEnabled() const { return radioEnabled_; }
     bool connected() const { return WiFi.status() == WL_CONNECTED; }
     uint8_t queuedEvents() const { return count_; }
+    uint64_t pendingStoredRecords() const { return spool_.pendingCount(); }
+    uint8_t pendingRamRecords() const { return pendingFlashRecordCount_; }
     uint32_t sentEvents() const { return sentEvents_; }
     uint32_t sentStatuses() const { return sentStatuses_; }
     uint32_t telemetryWritesPerSecond() const { return telemetryWritesPerSecond_; }
@@ -131,6 +135,7 @@ private:
     float windowVibrationMagnitude_ = 0.0F;
     float windowVibrationJerk_ = 0.0F;
     bool uploadOnly_ = false;
+    bool scheduledStandby_ = false;
     uint64_t controlId_ = 0;
     uint64_t uploadTotal_ = 0;
     bool enabled_ = false;

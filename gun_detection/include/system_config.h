@@ -5,10 +5,35 @@
 #ifndef GUN_CAPACITY_TEST_MODE
 #define GUN_CAPACITY_TEST_MODE 0
 #endif
+#ifndef GUN_STANDBY_TEST_MODE
+#define GUN_STANDBY_TEST_MODE 0
+#endif
 
 namespace config {
 
 inline constexpr bool CAPACITY_TEST_MODE = GUN_CAPACITY_TEST_MODE != 0;
+
+// 每日北京时间定时待机；只在已有有效 GPS/NTP 日历时间后启用。
+inline constexpr bool NIGHT_STANDBY_ENABLED = true;//是否启用定时休眠
+inline constexpr uint8_t NIGHT_STANDBY_START_HOUR = 23;    // 几点休眠：小时 0~23。
+inline constexpr uint8_t NIGHT_STANDBY_START_MIN = 0;      // 几点休眠：分钟 0~59。
+inline constexpr uint8_t NIGHT_STANDBY_END_HOUR = 11;       // 几点工作：小时 0~23。
+inline constexpr uint8_t NIGHT_STANDBY_END_MIN = 0;        // 几点工作：分钟 0~59。
+static_assert(NIGHT_STANDBY_START_HOUR < 24 && NIGHT_STANDBY_END_HOUR < 24 &&
+              NIGHT_STANDBY_START_MIN < 60 && NIGHT_STANDBY_END_MIN < 60,
+              "Standby hours must be 0-23 and minutes 0-59");
+inline constexpr uint16_t NIGHT_STANDBY_START_MINUTE = NIGHT_STANDBY_START_HOUR * 60 + NIGHT_STANDBY_START_MIN;
+inline constexpr uint16_t NIGHT_STANDBY_END_MINUTE = NIGHT_STANDBY_END_HOUR * 60 + NIGHT_STANDBY_END_MIN;
+static_assert(NIGHT_STANDBY_START_MINUTE < 1440 && NIGHT_STANDBY_END_MINUTE < 1440 &&
+              NIGHT_STANDBY_START_MINUTE != NIGHT_STANDBY_END_MINUTE,
+              "Daily standby needs distinct start/end minutes within a day");
+
+// 测试无限续航目标启用：每次上电只运行一次，完成后一直工作，忽略每日待机时段。
+inline constexpr bool STANDBY_TEST_ENABLED = GUN_STANDBY_TEST_MODE != 0;
+inline constexpr uint16_t STANDBY_TEST_DELAY_MINUTES = 1;  // 上电工作几分钟后休眠。
+inline constexpr uint16_t STANDBY_TEST_SLEEP_MINUTES = 1;  // 休眠几分钟后恢复。
+static_assert(!STANDBY_TEST_ENABLED || (!CAPACITY_TEST_MODE && STANDBY_TEST_SLEEP_MINUTES > 0),
+              "Standby test requires a positive sleep duration and cannot be a capacity test");
 
 // 硬件引脚定义（ESP32-S3）。
 inline constexpr uint8_t MIC_ADC_PIN = 8;       // ADC1_CH7

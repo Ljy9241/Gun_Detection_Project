@@ -1,6 +1,6 @@
 # ESP32-S3 检测固件
 
-CPU 频率以 `platformio.ini` 的 `board_build.f_cpu` 为准（当前 160 MHz），麦克风和三轴加速度保持每路 1 kHz 连续采样与识别；未启用轻睡眠或深睡眠。GPS 独立周期启停，Wi-Fi 按现有动作/窗口策略运行。周期诊断每 10 秒输出一次，启动日志打印实际 CPU 频率。
+CPU 频率以 `platformio.ini` 的 `board_build.f_cpu` 为准（当前 160 MHz），麦克风和三轴加速度保持每路 1 kHz 连续采样与识别；白天不启用睡眠，夜间按北京时间 20:00 至次日 08:00 进入轻睡眠。GPS 独立周期启停，Wi-Fi 按现有动作/窗口策略运行。周期诊断每 10 秒输出一次，启动日志打印实际 CPU 频率。
 
 ## 引脚分配
 
@@ -96,6 +96,63 @@ python gun_detection/tests/native/replay_recordings.py output/motion_direction/n
 测试构建会暂停遥测上传并继续采集，直到 LittleFS 无法再写入记录。达到上限时，它会停止新增遥测，统计并持久化存满时的未上传记录数和 LittleFS 已用/总字节数；串口会打印 `CAPACITY_TEST_FULL`，重启后会打印已保存的 `CAPACITY_TEST_RESULT`。之后设备联网并连接上位机时，遥测批次会开始上传，监视程序的“Flash 存储”框会显示存满标志、条数和字节数。因测试快照已锁定，ACK 回收空间后不会再写入新遥测。
 
 测量结果保存在 NVS 中。读取结果前请保留当前测试构建，不要重新编译容量测试环境、清空设备 NVS 或格式化 LittleFS，否则会启动新测试并清除当前结果；测完后再烧录正常目标 `esp32-s3-devkitm-1`。此测试目标是一次性容量测量用途，不应用于日常运行。
+
+## 每日定时夜间待机
+
+在 `include/system_config.h` 中自行设置小时和分钟：
+
+```cpp
+inline constexpr bool NIGHT_STANDBY_ENABLED = true;
+inline constexpr uint8_t NIGHT_STANDBY_START_HOUR = 20;
+inline constexpr uint8_t NIGHT_STANDBY_START_MIN = 0;
+inline constexpr uint8_t NIGHT_STANDBY_END_HOUR = 8;
+inline constexpr uint8_t NIGHT_STANDBY_END_MIN = 0;
+```
+
+以上表示按北京时间每天 20:00（含）至次日 08:00（不含）自动待机。例如开始小时 21、开始分钟 30、结束小时 7、结束分钟 15 表示 21:30 至次日 07:15。小时范围 0~23、分钟 0~59；编译检查非法范围及开始/结束相同的配置。`NIGHT_STANDBY_START_MINUTE` 和 `NIGHT_STANDBY_END_MINUTE` 是自动计算值，不需要改。修改后重新编译烧录正常目标 `esp32-s3-devkitm-1`。
+
+不需要外接检测线。此功能按时钟运行，不检测是否真的在无线充电器上；待机期间不检测动作和声音。
+
+只有已有有效 GPS/NTP 日历时间才执行夜间待机，尚未校时的 `T+...` 阶段继续正常工作。夜间待机优先于普通 Wi-Fi/GPS 常开、低功耗周期联网及仅传输模式；进入待机会退出仅传输模式，早上恢复正常采集。独立 Flash 容量测试构建禁用夜间待机。
+
+进入待机时，由拥有 ADC 驱动的采样任务停止 DMA，主循环等候停止确认；随后 MMA7361 SLEEP 拉低、GPS 关闭、Wi-Fi 关闭、定时遥测/识别/诊断停止。待写遥测和 GPS 快照先尝试写入 Flash；失败时保留原始 RAM 缓冲，已有 Flash 和待上传事件队列不清除。ESP32 进入轻睡眠，保留 RAM 和 RTC，设置定时器到结束时刻唤醒，不进行整机断电或深睡眠。无法进入轻睡眠时保持外围停止并间隔重试，串口输出错误。
+
+08:00 唤醒后重新开启传感器和 GPS，重置检测器并重新进行约 2 秒静止校准，恢复每路 1 kHz 连续采样识别、每 10 秒定时记录及原 Wi-Fi/GPS 策略；夜间不补造记录。GPS 从一个新的定位窗口开始。RTC 日历和记录序号继续使用，RAM 待写数据在恢复后继续处理。
+
+此板咪头/LMV358 直接连接 3.3 V，GPS EN 也不等于切断 GPS 主电源，因此软件待机不代表所有外围电路零耗电。充电芯片独立工作，不受 ESP32 睡眠影响。电池耗尽或整机断电仍会失去 RTC 基准和未落盘的 RAM 数据。
+
+`tests/native/daily_standby_test.cpp` 验证北京时间转换、跨午夜、20:00/08:00 边界、每日重复、分钟级配置及未校时不待机。实机应观察 `NIGHT_STANDBY_ENTER` / `NIGHT_STANDBY_EXIT` 日志，测量待机电流，并检查早晨恢复后的 ADC 溢出和声音/动作识别；可临时把时段配置到当前时间附近验证，无需等待一整夜。
+
+## 快速验证休眠与恢复（每次上电一次）
+
+独立目标 `esp32-s3-standby-test` 使用同一套 ADC 停止、GPS/Wi-Fi 关闭、轻睡眠、RTC 保留和恢复代码，不清空 Flash，也不修改正常目标的每日时段。默认初始化后工作 2 分钟、轻睡眠 2 分钟，恢复后一直工作。测试目标在整次启动中忽略每日待机时段，避免晚上测试完又立即进入夜间休眠。复位或断电重启会再次执行一次测试；正式使用请烧录正常目标。
+
+在 `include/system_config.h` 改这两个值可调整测试时长：
+
+```cpp
+inline constexpr uint16_t STANDBY_TEST_DELAY_MINUTES = 2;
+inline constexpr uint16_t STANDBY_TEST_SLEEP_MINUTES = 2;
+```
+
+测试倒计时使用单调计时器，不依赖 GPS/NTP，所以未获得日历时间也能进入测试休眠；但这种情况下日志显示 `calendar=UNSYNCED`，不能据此验证日历 RTC 连续性。若首次校时需要更久，请将等待设为 5 分钟或更长，或让热点联网完成 NTP 校时。
+
+在 `gun_detection` 目录执行：
+
+```powershell
+pio run -e esp32-s3-standby-test -t upload
+pio device monitor -b 115200
+```
+
+建议的实机步骤：
+
+1. 保持电池持续连接。前两分钟让设备接入可用热点完成 NTP，或等待 GPS 授时，确认日志出现年月日。先不要启动上位机监听，让 Flash 中有待上传记录；做几次动作和声音触发，记下累计计数。
+2. 看到 `STANDBY_TEST_SLEEP` 后设备应停止采样、记录及联网，等待约 2 分钟；可同时观察电池端电流下降。不要断开电池；串口供电可能影响电流测量。
+3. 唤醒输出 `STANDBY_BEFORE` / `STANDBY_AFTER` 时间，`STANDBY_AUDIT` 中 `rtc_advance_ms`、`uptime_advance_ms` 应约为 120000，`adc_frames_delta=0`、`flash_writes_delta=0`，`pending_counts=UNCHANGED`、`shot_count=UNCHANGED`。
+4. 恢复时保持静止约 2 秒以便重新校准。约 3 秒后 `STANDBY_RESUME_CHECK` 显示每通道实际处理速率，应接近 1000 Hz、`mma_calibrated=yes`，同时观察 ADC overrun/丢样是否持续增加。计数和速率用于诊断，不代替真实动作/声音漏检测试。
+5. 再做动作和声音触发，确认事件、累计计数及每 10 秒记录恢复。启动上位机监听，确认休眠前后的旧记录都能上传，休眠期间没有新增定时记录。`pending_counts=UNCHANGED` 只验证缓存计数保持，不是对所有 Flash 内容的完整校验。
+6. 确认后烧录正常目标：`pio run -e esp32-s3-devkitm-1 -t upload`，恢复每天自定义时段的工作策略。
+
+`tests/native/standby_test_test.cpp` 验证一次性倒计时、停采样/写盘延迟不缩短休眠、提前唤醒不延长休眠、结束边界、不重复测试以及 64 位累计时间；实机睡眠、唤醒和数据上传仍按上述步骤验证。
 
 ## 普通模式自动低功耗
 

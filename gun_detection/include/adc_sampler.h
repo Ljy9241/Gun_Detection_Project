@@ -21,10 +21,11 @@ class AdcSampler {
 public:
     bool begin();
     bool start();
-    void stop();
+    bool stop();
     size_t read(AdcSample* samples, size_t capacity, uint64_t newestSampleUs);
     uint32_t overrunCount() const { return overrunCount_; }
     bool ready() const { return ready_; }
+    bool running() const { return running_; }
 
 private:
     volatile bool ready_ = false;

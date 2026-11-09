@@ -120,7 +120,44 @@ bool WifiTransport::appendTelemetrySnapshot(const TelemetryRecord& record) {
     return true;
 }
 
+bool WifiTransport::flushPendingTelemetry() {
+    if (pendingFlashRecordCount_ == 0) return true;
+    const size_t committed = spool_.appendBatch(pendingFlashRecords_, pendingFlashRecordCount_);
+    telemetryWritesTotal_ += committed;
+    pendingFlashRecordCount_ -= static_cast<uint8_t>(committed);
+    if (committed > 0 && pendingFlashRecordCount_ > 0) {
+        memmove(pendingFlashRecords_, pendingFlashRecords_ + committed,
+                pendingFlashRecordCount_ * sizeof(TelemetryRecord));
+    }
+    return pendingFlashRecordCount_ == 0;
+}
+
+void WifiTransport::setScheduledStandby(bool standby, uint32_t nowMs) {
+    scheduledStandby_ = standby;
+    if (standby) {
+        // Night standby takes priority over normal always-on Wi-Fi and upload-only.
+        uploadOnly_ = false;
+        normalWifiWindow_.cancel();
+        resetDiscovery(nowMs);
+        udp_.stop();
+        ackListenerStarted_ = false;
+        WiFi.setAutoReconnect(false);
+        WiFi.disconnect();
+        WiFi.mode(WIFI_OFF);
+        radioEnabled_ = false;
+        wasConnected_ = false;
+    } else {
+        lastSpoolMs_ = nowMs;  // Wait for fresh, resumed sensor samples.
+        lastSpoolRateMs_ = nowMs;
+        lastSpoolRateTotal_ = telemetryWritesTotal_;
+        telemetryWritesPerSecond_ = 0;
+        windowMicPeakToPeak_ = 0;
+        windowMicRms_ = windowVibrationMagnitude_ = windowVibrationJerk_ = 0;
+    }
+}
+
 void WifiTransport::update(uint32_t nowMs) {
+    if (scheduledStandby_) return;
     const uint32_t spoolIntervalMs = lowPowerMode_
         ? config::LOW_POWER_TELEMETRY_INTERVAL_MS
         : config::TELEMETRY_SPOOL_INTERVAL_MS;
@@ -137,15 +174,7 @@ void WifiTransport::update(uint32_t nowMs) {
     // Only the high-rate capacity test batches writes.
     if (pendingFlashRecordCount_ > 0 && !spool_.full() && !spool_.capacityTestFull() &&
         (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || !config::CAPACITY_TEST_MODE || lowPowerMode_ || uploadOnly_)) {
-        const size_t committed = spool_.appendBatch(pendingFlashRecords_, pendingFlashRecordCount_);
-        if (committed > 0) {
-            telemetryWritesTotal_ += committed;
-            pendingFlashRecordCount_ -= static_cast<uint8_t>(committed);
-            if (pendingFlashRecordCount_ > 0) {
-                memmove(pendingFlashRecords_, pendingFlashRecords_ + committed,
-                        pendingFlashRecordCount_ * sizeof(TelemetryRecord));
-            }
-        }
+        flushPendingTelemetry();
     }
     if (spool_.full() && spool_.capacityTestMode() && !spool_.capacityTestResultSaved()) {
         spool_.latchCapacityTestFull();
