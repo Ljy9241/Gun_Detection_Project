@@ -6,6 +6,7 @@
 
 #include "adc_sampler.h"
 #include "gps_manager.h"
+#include "gps_cycle.h"
 #include "shot_detector.h"
 #include "low_power_motion_wake.h"
 #include "system_config.h"
@@ -39,11 +40,10 @@ uint32_t verticalMotionCount = 0;  // 本次启动以来识别的完整竖向动
 bool lowPowerMode = false;
 LowPowerMotionWake lowPowerMotionWake;
 uint64_t stationarySinceUs = 0;
-bool lowPowerGpsWindowActive = false;
-uint32_t lowPowerGpsWindowStartMs = 0;
-bool lowPowerGpsFixHoldActive = false;
-uint32_t lowPowerGpsFixStartMs = 0;
-uint32_t nextLowPowerGpsStartMs = 0;
+GpsCycle gpsCycle(config::GPS_CYCLE_MS, config::GPS_WINDOW_MS);
+bool gpsSnapshotPending = false;
+TelemetryRecord gpsSnapshot;
+uint32_t lastGpsFlashAttemptMs = 0;
 
 struct SensorSnapshot {
     MotionEvent motionEvent;
@@ -184,6 +184,7 @@ void setup() {
     delay(500);
     Serial.println();
     Serial.println("Gun detection firmware starting...");
+    Serial.printf("CPU frequency: %lu MHz\n", static_cast<unsigned long>(getCpuFrequencyMhz()));
 
     voiceDetection.begin(config::MIC_ADC_PIN);
     vibrateDetection.begin(config::MMA_X_PIN, config::MMA_Y_PIN, config::MMA_Z_PIN,
@@ -194,6 +195,7 @@ void setup() {
     // Start Wi-Fi before launching the high-priority sampler so radio
     // association does not depend on the ADC task yielding during startup.
     wifiTransport.begin();
+    gpsCycle.startIfDue(millis());  // First window starts immediately at boot.
     if (adcSampler.ready()) {
         adcReaderTaskStarted = xTaskCreatePinnedToCore(
             adcReaderTask, "adc-reader", 4096, nullptr, 5, nullptr, 1) == pdPASS;
@@ -217,13 +219,11 @@ void loop() {
         gps.setEnabled(false);
         lowPowerMode = false;
         stationarySinceUs = 0;
-        lowPowerGpsWindowActive = false;
-        lowPowerGpsFixHoldActive = false;
+        gpsCycle.finish();
         delay(1);
         return;
     }
     if (pauseSampling.exchange(false)) {
-        gps.setEnabled(true);
         if (!adcReaderTaskStarted) {
             voiceDetection = VoiceDetection{};
             vibrateDetection = VibrateDetection{};
@@ -258,9 +258,6 @@ void loop() {
                     static_cast<uint64_t>(config::LOW_POWER_STILLNESS_MS) * 1000ULL) {
                     lowPowerMode = true;
                     lowPowerMotionWake.reset();
-                    nextLowPowerGpsStartMs = nowMs;  // 首个 GPS 窗口立即启动。
-                    lowPowerGpsWindowActive = false;
-                    lowPowerGpsFixHoldActive = false;
                     wifiTransport.setLowPowerMode(true, nowMs);
                     Serial.println("Stillness >5s; entering low-power schedule.");
                 }
@@ -271,45 +268,15 @@ void loop() {
                            sensors.hasMotionEvent ? &sensors.motionEvent : nullptr)) {
             lowPowerMode = false;
             stationarySinceUs = 0;
-            lowPowerGpsWindowActive = false;
-            gps.setEnabled(true);
             wifiTransport.setLowPowerMode(false, nowMs);
             Serial.println("Motion detected; normal mode restored.");
         }
     }
 
-    if (lowPowerMode) {
-        if (!lowPowerGpsWindowActive &&
-            static_cast<int32_t>(nowMs - nextLowPowerGpsStartMs) >= 0) {
-            gps.setEnabled(true);
-            lowPowerGpsWindowActive = true;
-            lowPowerGpsWindowStartMs = nowMs;
-            lowPowerGpsFixHoldActive = false;
-            nextLowPowerGpsStartMs += config::LOW_POWER_GPS_CYCLE_MS;
-            Serial.println("Low-power GPS window started.");
-        }
-        if (lowPowerGpsWindowActive) {
-            const GpsFix windowFix = gps.currentFix();
-            const bool gotFix = windowFix.valid;
-            const bool timedOut = nowMs - lowPowerGpsWindowStartMs >= config::LOW_POWER_GPS_WINDOW_MS;
-            if (gotFix && !lowPowerGpsFixHoldActive) {
-                lowPowerGpsFixHoldActive = true;
-                lowPowerGpsFixStartMs = nowMs;
-                Serial.println("Low-power GPS fix acquired; keeping GPS on for post-fix hold.");
-            }
-            const bool postFixHoldComplete = lowPowerGpsFixHoldActive &&
-                nowMs - lowPowerGpsFixStartMs >= config::LOW_POWER_GPS_POST_FIX_HOLD_MS;
-            if (postFixHoldComplete || (!lowPowerGpsFixHoldActive && timedOut)) {
-                gps.setEnabled(false);
-                lowPowerGpsWindowActive = false;
-                lowPowerGpsFixHoldActive = false;
-                Serial.println(postFixHoldComplete
-                    ? "Low-power GPS post-fix hold complete; GPS off."
-                    : "Low-power GPS timed out after 5 minutes; GPS off.");
-            }
-        }
-    } else {
+    // Motion changes never restart or extend the independent GPS schedule.
+    if (gpsCycle.startIfDue(nowMs)) {
         gps.setEnabled(true);
+        Serial.println("GPS periodic window started.");
     }
     gps.update();
 
@@ -373,6 +340,39 @@ void loop() {
     telemetry.voiceDroppedSamples = sensors.voiceDroppedSamples;
     telemetry.vibrationDroppedSamples = sensors.vibrationDroppedSamples;
     wifiTransport.setTelemetry(telemetry);
+
+    if (!config::CAPACITY_TEST_MODE && gpsCycle.active() && fix.valid && !gpsSnapshotPending) {
+        // Copy values under the sensor lock without consuming any new events.
+        portENTER_CRITICAL(&sensorStateMux);
+        telemetry.micRaw = voiceDetection.latestRaw();
+        telemetry.micPeakToPeak = voiceDetection.latestPeakToPeak();
+        telemetry.micRms = voiceDetection.latestRms();
+        telemetry.vibrationX = vibrateDetection.rawX();
+        telemetry.vibrationY = vibrateDetection.rawY();
+        telemetry.vibrationZ = vibrateDetection.rawZ();
+        portEXIT_CRITICAL(&sensorStateMux);
+        gpsSnapshot = wifiTransport.makeTelemetryRecord(telemetry);
+        gpsSnapshotPending = true;
+        lastGpsFlashAttemptMs = nowMs - config::GPS_FLASH_RETRY_MS;
+    }
+    if (gpsSnapshotPending && nowMs - lastGpsFlashAttemptMs >= config::GPS_FLASH_RETRY_MS) {
+        lastGpsFlashAttemptMs = nowMs;
+        if (wifiTransport.appendTelemetrySnapshot(gpsSnapshot)) {
+            gpsSnapshotPending = false;
+            gps.setEnabled(false);
+            gpsCycle.finish();
+            Serial.println("GPS fix and sensor snapshot saved to Flash; GPS off.");
+        } else {
+            Serial.println("GPS snapshot Flash write failed; retaining original snapshot for retry.");
+        }
+    }
+    if (gpsCycle.timedOut(nowMs)) {
+        gps.setEnabled(false);
+        gpsCycle.finish();
+        Serial.println(gpsSnapshotPending
+            ? "GPS 3-minute window ended; snapshot still pending Flash retry; GPS off."
+            : "GPS timed out after 3 minutes without a saved fix; GPS off.");
+    }
     wifiTransport.update(nowMs);
 
 
@@ -408,5 +408,11 @@ void loop() {
             static_cast<unsigned long>(sensors.vibrationDroppedSamples));
     }
 
-    yield();
+    // Block only this loop task, never the independent 1 kHz DMA reader.
+    // Retain the polling fallback's timing if the DMA worker did not start.
+    if (adcReaderTaskStarted && adcSampler.ready()) {
+        vTaskDelay(1);
+    } else {
+        yield();
+    }
 }

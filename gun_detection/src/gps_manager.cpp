@@ -4,16 +4,7 @@
 #include <time.h>
 
 #include "system_config.h"
-
-static int64_t daysFromCivil(int year, unsigned month, unsigned day) {
-    year -= month <= 2;
-    const int era = (year >= 0 ? year : year - 399) / 400;
-    const unsigned yearOfEra = static_cast<unsigned>(year - era * 400);
-    const unsigned adjustedMonth = month > 2 ? month - 3 : month + 9;
-    const unsigned dayOfYear = (153 * adjustedMonth + 2) / 5 + day - 1;
-    const unsigned dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
-    return static_cast<int64_t>(era) * 146097 + dayOfEra - 719468;
-}
+#include "gps_clock_policy.h"
 
 void GpsManager::begin(uint8_t enablePin, uint8_t ppsPin, int8_t rxPin, int8_t txPin,
                        uint32_t baud) {
@@ -32,6 +23,8 @@ void GpsManager::begin(uint8_t enablePin, uint8_t ppsPin, int8_t rxPin, int8_t t
 void GpsManager::setEnabled(bool enabled) {
     if (enabled == enabled_) return;
     if (enabled) {
+        // A new window must acquire fresh NMEA, never accept the previous fix.
+        gps_ = TinyGPSPlus{};
         digitalWrite(enablePin_, HIGH);
         serial_.begin(baud_, SERIAL_8N1, rxPin_, txPin_);
     } else {
@@ -51,14 +44,19 @@ void GpsManager::update() {
     // GPS 日期/时间为 UTC；用有效 NMEA 时间校准 ESP32 的 RTC 系统时钟。
     if (gps_.date.isValid() && gps_.time.isValid() && gps_.date.age() <= 5000 &&
         gps_.time.age() <= 2000) {
-        const int64_t days = daysFromCivil(gps_.date.year(), gps_.date.month(), gps_.date.day());
-        const time_t epoch = static_cast<time_t>(
-            days * 86400 + gps_.time.hour() * 3600 + gps_.time.minute() * 60 +
-            gps_.time.second());
-        if (epoch > 0 && static_cast<uint32_t>(epoch) != lastClockSyncEpoch_) {
-            timeval value = {epoch, static_cast<suseconds_t>(gps_.time.centisecond() * 10000)};
-            settimeofday(&value, nullptr);
-            lastClockSyncEpoch_ = static_cast<uint32_t>(epoch);
+        int64_t candidate = 0;
+        const unsigned centisecond = gps_.time.centisecond();
+        if (!gps_clock::utcEpoch(gps_.date.year(), gps_.date.month(), gps_.date.day(),
+                                 gps_.time.hour(), gps_.time.minute(), gps_.time.second(),
+                                 centisecond, candidate) ||
+            !gps_clock::maySync(candidate, static_cast<int64_t>(time(nullptr)))) return;
+        const time_t epoch = static_cast<time_t>(candidate);
+        if (static_cast<int64_t>(epoch) != candidate) return;
+        if (static_cast<uint32_t>(epoch) != lastClockSyncEpoch_) {
+            timeval value = {epoch, static_cast<suseconds_t>(centisecond * 10000)};
+            if (settimeofday(&value, nullptr) == 0) {
+                lastClockSyncEpoch_ = static_cast<uint32_t>(epoch);
+            }
         }
     }
 }
@@ -66,7 +64,7 @@ void GpsManager::update() {
 GpsFix GpsManager::currentFix() {
     GpsFix fix;
     // 定位字段可能仍有旧值；只有坐标有效且未超过允许年龄时才标记为有效。
-    fix.valid = gps_.location.isValid() && gps_.location.age() <= config::GPS_MAX_FIX_AGE_MS;
+    fix.valid = enabled_ && gps_.location.isValid() && gps_.location.age() <= config::GPS_MAX_FIX_AGE_MS;
     if (gps_.location.isValid()) {
         fix.latitude = gps_.location.lat();
         fix.longitude = gps_.location.lng();

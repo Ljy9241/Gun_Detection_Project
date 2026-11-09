@@ -48,6 +48,8 @@ public:
     // 建立 Wi-Fi 站点连接；网络不可用时由 update 周期重试。
     void begin();
     void setTelemetry(const WifiTelemetry& telemetry);
+    TelemetryRecord makeTelemetryRecord(const WifiTelemetry& telemetry) const;
+    bool appendTelemetrySnapshot(const TelemetryRecord& record);
     void setLowPowerMode(bool enabled, uint32_t nowMs);
     void onMotionDirection(MotionDirection direction, uint32_t nowMs);
     void update(uint32_t nowMs);

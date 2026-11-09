@@ -55,30 +55,30 @@ inline constexpr uint16_t DEVICE_UDP_PORT = 8889;  // 接收电脑端入库确�
 inline constexpr char NTP_SERVER[] = "pool.ntp.org";
 inline constexpr char DEVICE_ID[] = "gun_dection";
 // 普通模式：true 上电自动联网；false 等待完整竖向动作后临时联网。
-inline constexpr bool NORMAL_WIFI_ALWAYS_ON = false;
+inline constexpr bool NORMAL_WIFI_ALWAYS_ON = true;
 inline constexpr uint32_t NORMAL_WIFI_HOLD_MS = 10000;          // 首次连上热点后保持的毫秒数（默认 2 分钟）。
 inline constexpr uint32_t NORMAL_WIFI_CONNECT_TIMEOUT_MS = 60000; // 未能连上热点时最多尝试 1 分钟。
 static_assert(NORMAL_WIFI_HOLD_MS > 0 && NORMAL_WIFI_CONNECT_TIMEOUT_MS > 0,
               "Normal Wi-Fi window durations must be positive");
 inline constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 30000;      // 连接失败后再尝试的最短间隔；避免打断首次连接
-inline constexpr uint32_t TELEMETRY_SPOOL_INTERVAL_MS = 50;       // 遥测记录写入 Flash 的目标间隔
+inline constexpr uint32_t TELEMETRY_SPOOL_INTERVAL_MS = CAPACITY_TEST_MODE ? 50 : 10000; // 日常每 10 秒记录；容量测试保留 20 Hz。
 inline constexpr uint8_t TELEMETRY_FLASH_BATCH_RECORDS = 20;      // RAM 累积 20 条后一次写入 Flash；断电最多损失约 20 条。
-inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 50;           // UDP 状态包每秒发送 4 次；降低主循环及 LittleFS 状态查询负担。
+inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 250;           // UDP 状态包每秒发送 4 次；降低主循环及 LittleFS 状态查询负担。
 inline constexpr uint32_t UDP_EVENT_RETRY_INTERVAL_MS = 100;      // 发送失败的事件至少间隔 100 毫秒重试，避免 UDP 错误时忙循环。
 inline constexpr uint32_t UDP_TELEMETRY_RETRY_INTERVAL_MS = 500;  // 遥测批次失败或等待 ACK 时的重试间隔，单位：毫秒。
-inline constexpr float LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS = 70.0F; // 相邻采样任意单轴变化绝对值超过此值视为运动，单位：ADC counts。
+inline constexpr float LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS = 1.0F; // 相邻采样任意单轴变化绝对值超过此值视为运动，单位：ADC counts。
 inline constexpr uint32_t LOW_POWER_STILLNESS_MS = 5000;              // 静止持续此时长后进入低功耗，单位：毫秒。
 inline constexpr uint32_t LOW_POWER_TELEMETRY_INTERVAL_MS = 10000;    // 低功耗期间两条遥测记录的写入间隔，单位：毫秒。
-inline constexpr uint32_t LOW_POWER_GPS_CYCLE_MS = 600000;            // GPS 重复启动周期，单位：毫秒（10 分钟）。
-inline constexpr uint32_t LOW_POWER_GPS_WINDOW_MS = 180000;            // GPS 未取得有效定位时的最长工作时间，单位：毫秒（3 分钟）。
-inline constexpr uint32_t LOW_POWER_GPS_POST_FIX_HOLD_MS = 15000;      // GPS 首次取得有效定位后继续开启的时长，单位：毫秒（30 秒）。
-inline constexpr bool LOW_POWER_WIFI_CYCLE_ENABLED = false;           // 仅控制低功耗定时联网；不影响竖向动作联网。
+inline constexpr uint32_t GPS_CYCLE_MS = 600000;                     // 与运动/静止模式无关，启动间隔 10 分钟。
+inline constexpr uint32_t GPS_WINDOW_MS = 180000;                    // 单次定位窗口最长 3 分钟。
+inline constexpr uint32_t GPS_FLASH_RETRY_MS = 1000;                 // 快照写入失败时每秒重试，不忙循环。
+inline constexpr bool LOW_POWER_WIFI_CYCLE_ENABLED = true;           // 仅控制低功耗定时联网；不影响竖向动作联网。
 inline constexpr uint32_t LOW_POWER_VERTICAL_WIFI_HOLD_MS = 10000;   // 低功耗竖向动作连上热点后保持 2 分钟。
 static_assert(LOW_POWER_VERTICAL_WIFI_HOLD_MS > 0, "Low-power gesture Wi-Fi duration must be positive");
 inline constexpr uint32_t LOW_POWER_WIFI_CYCLE_MS = 600000;           // WiFi 重复连接周期，单位：毫秒（10 分钟）。
 inline constexpr uint32_t LOW_POWER_WIFI_WINDOW_MS = 300000;           // 每个周期内 WiFi 保持开启的时长，单位：毫秒（5 分钟）。
 
 // 串口诊断信息的输出周期。
-inline constexpr uint32_t DIAGNOSTIC_INTERVAL_MS = 500;
+inline constexpr uint32_t DIAGNOSTIC_INTERVAL_MS = 10000;
 
 }  // namespace config

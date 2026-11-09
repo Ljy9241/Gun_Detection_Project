@@ -83,7 +83,6 @@ void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
     lowPowerMode_ = enabled;
     if (enabled) {
         lowPowerCycleStartMs_ = nowMs;  // 启用周期模式时，进入低功耗后立即开始第一个窗口。
-        lastSpoolMs_ = nowMs;
         Serial.printf("LOW_POWER_ENTER: telemetry interval=%lus, Wi-Fi %s",
                       static_cast<unsigned long>(config::LOW_POWER_TELEMETRY_INTERVAL_MS / 1000U),
                       config::LOW_POWER_WIFI_CYCLE_ENABLED ? "cycle " : "on vertical motion.\n");
@@ -93,9 +92,32 @@ void WifiTransport::setLowPowerMode(bool enabled, uint32_t nowMs) {
                           static_cast<unsigned long>(config::LOW_POWER_WIFI_CYCLE_MS / 1000U));
         }
     } else {
-        lastSpoolMs_ = nowMs - config::TELEMETRY_SPOOL_INTERVAL_MS;
         Serial.println("LOW_POWER_EXIT: returning to normal sampling and Wi-Fi.");
     }
+}
+
+TelemetryRecord WifiTransport::makeTelemetryRecord(const WifiTelemetry& telemetry) const {
+    TelemetryRecord record;
+    record.bootId = bootId_;
+    record.uptimeMs = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+    formatTimestamp(record.timestamp, sizeof(record.timestamp));
+    record.accelX = telemetry.vibrationX;
+    record.accelY = telemetry.vibrationY;
+    record.accelZ = telemetry.vibrationZ;
+    record.micRaw = telemetry.micRaw;
+    record.micP2p = telemetry.micPeakToPeak;
+    record.micRms = telemetry.micRms;
+    record.latitude = telemetry.latitude;
+    record.longitude = telemetry.longitude;
+    record.gpsValid = telemetry.gpsValid ? 1 : 0;
+    return record;
+}
+
+bool WifiTransport::appendTelemetrySnapshot(const TelemetryRecord& record) {
+    // Direct durable write; never adjust the periodic recorder's deadline.
+    if (!spool_.append(record)) return false;
+    ++telemetryWritesTotal_;
+    return true;
 }
 
 void WifiTransport::update(uint32_t nowMs) {
@@ -105,28 +127,16 @@ void WifiTransport::update(uint32_t nowMs) {
     if (!uploadOnly_ && nowMs - lastSpoolMs_ >= spoolIntervalMs) {
         lastSpoolMs_ = nowMs;
         if (!spool_.capacityTestFull()) {
-            TelemetryRecord record;
-            record.bootId = bootId_;
-            record.uptimeMs = static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
-            formatTimestamp(record.timestamp, sizeof(record.timestamp));
-            record.accelX = telemetry_.vibrationX;
-            record.accelY = telemetry_.vibrationY;
-            record.accelZ = telemetry_.vibrationZ;
-            record.micRaw = telemetry_.micRaw;
-            record.micP2p = telemetry_.micPeakToPeak;
-            record.micRms = telemetry_.micRms;
-            record.latitude = telemetry_.latitude;
-            record.longitude = telemetry_.longitude;
-            record.gpsValid = telemetry_.gpsValid ? 1 : 0;
+            const TelemetryRecord record = makeTelemetryRecord(telemetry_);
             if (pendingFlashRecordCount_ < config::TELEMETRY_FLASH_BATCH_RECORDS) {
                 pendingFlashRecords_[pendingFlashRecordCount_++] = record;
             }
         }
     }
-    // Batch normal-mode writes; low-power records flush immediately so they do
-    // not remain volatile for minutes between 10-second telemetry samples.
+    // Daily 10-second records flush immediately in either motion state.
+    // Only the high-rate capacity test batches writes.
     if (pendingFlashRecordCount_ > 0 && !spool_.full() && !spool_.capacityTestFull() &&
-        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || lowPowerMode_ || uploadOnly_)) {
+        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || !config::CAPACITY_TEST_MODE || lowPowerMode_ || uploadOnly_)) {
         const size_t committed = spool_.appendBatch(pendingFlashRecords_, pendingFlashRecordCount_);
         if (committed > 0) {
             telemetryWritesTotal_ += committed;
