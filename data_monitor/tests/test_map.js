@@ -37,9 +37,10 @@ run(`startMap();draw({device:'a',boot:'b',bucket_ms:1000,points:[
   {ms:2000,time:'T+2',lat:31.001,lon:121.001,valid:true},
   {ms:3000,time:'T+3',lat:null,lon:null,valid:false},
   {ms:4000,time:'T+4',lat:31.002,lon:121.002,valid:true},
-  {ms:5000,time:'T+5',lat:31.003,lon:121.003,valid:true}],
+  {ms:65000,time:'T+65',lat:31.003,lon:121.003,valid:true}],
   shots:[{ms:2000,time:'T+2',lat:31.001,lon:121.001,valid:true,shot:1}]});`);
-assert.equal(run('lines.length'),2,'GPS outage must break the line');
+assert.equal(run('lines.length'),1,'One boot draws one line across GPS outages and long gaps');
+assert.equal(run('lines[0].options.path.length'),4,'Only valid fixes belong to the line');
 assert.equal(run('markers.length'),3,'start, current, shot');
 run("$('speed').value='1';$('play').onclick();lastFrame=0;animate(1000)");
 assert.equal(run('playMs'),2000);

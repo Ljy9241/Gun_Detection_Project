@@ -103,9 +103,11 @@ function draw(data){
     }
     segment=[];
   };
+  // Legacy rows have no boot identity. Keep their gaps to avoid joining unrelated runs.
+  const legacy=data.boot==='legacy';
   for(const p of validPoints){
-    if(!p.valid){flush();continue;}
-    if(segment.length&&p.ms-segment[segment.length-1].ms>Math.max(30000,data.bucket_ms*3))flush();
+    if(!p.valid){if(legacy)flush();continue;}
+    if(legacy&&segment.length&&p.ms-segment[segment.length-1].ms>Math.max(30000,data.bucket_ms*3))flush();
     segment.push(p);
   }flush();
   if(points.length){
