@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "system_config.h"
 
@@ -16,6 +18,7 @@
 
 namespace {
 Preferences preferences;
+constexpr char spoolMount[] = "/littlefs";
 }
 
 uint32_t TelemetrySpool::checksum(const TelemetryRecord& record) {
@@ -93,7 +96,19 @@ void TelemetrySpool::segmentPath(uint32_t index, char* path, size_t size) {
     snprintf(path, size, "/q%08lu.bin", static_cast<unsigned long>(index));
 }
 
+bool TelemetrySpool::probeSegment(uint32_t index, bool& present) {
+    // This Arduino LittleFS version implements exists() via open("r"), which
+    // logs an error for every missing filename. Probe quietly only during mount.
+    char path[40];
+    snprintf(path, sizeof(path), "%s/q%08lu.bin", spoolMount, static_cast<unsigned long>(index));
+    struct stat info;
+    if (stat(path, &info) == 0) { present = true; return true; }
+    if (errno == ENOENT) { present = false; return true; }
+    return false; // An I/O error is not proof that a slot is safe to overwrite.
+}
+
 bool TelemetrySpool::begin(bool capacityTestMode) {
+    mounted_ = false;
     capacityTestMode_ = capacityTestMode;
     if (!preferences.begin("tlm-spool", false)) {
         Serial.println("Telemetry spool: NVS open failed.");
@@ -126,7 +141,7 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
         }
     }
 
-    mounted_ = LittleFS.begin(firstInitialization);
+    mounted_ = LittleFS.begin(firstInitialization, spoolMount);
     if (!mounted_) {
         Serial.println("Telemetry spool: LittleFS mount failed; flash was not formatted.");
         return false;
@@ -137,8 +152,14 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
         return false;
     }
     acknowledgedSequence_ = preferences.getULong64("acked", 0);
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    sealedThrough_ = preferences.getULong64("closedSeq", 0);
+    ordinaryThrough_ = preferences.getULong64("plainSeq", 0);
+    gpsThrough_ = preferences.getULong64("gpsSeq", 0);
+#endif
     persistedAcknowledgedSequence_ = acknowledgedSequence_;
     if (!scan()) {
+        mounted_ = false;
         Serial.println("Telemetry spool: scan failed.");
         return false;
     }
@@ -157,7 +178,7 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
         for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
             char path[20];
             segmentPath(index, path, sizeof(path));
-            if (LittleFS.exists(path) && !LittleFS.remove(path)) {
+            if (segmentPresent_[index] && !LittleFS.remove(path)) {
                 Serial.printf("Capacity test: failed to remove old segment %lu.\n",
                               static_cast<unsigned long>(index));
                 return false;
@@ -176,6 +197,7 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
         }
         persistedAcknowledgedSequence_ = acknowledgedSequence_;
         if (!scan()) {
+            mounted_ = false;
             Serial.println("Capacity test: scan failed after clearing old data.");
             return false;
         }
@@ -204,6 +226,7 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
     }
 
     if (!reserveSequenceBlock()) {
+        mounted_ = false;
         Serial.println("Telemetry spool: cannot reserve unique sequence numbers.");
         return false;
     }
@@ -229,25 +252,37 @@ bool TelemetrySpool::scan() {
     memset(segmentOffsets_, 0, sizeof(segmentOffsets_));
     memset(segmentHasPending_, 0, sizeof(segmentHasPending_));
     memset(segmentAppendable_, 0, sizeof(segmentAppendable_));
+    memset(segmentPresent_, 0, sizeof(segmentPresent_));
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    memset(segmentLast_, 0, sizeof(segmentLast_));
+    memset(segmentLastShot_, 0, sizeof(segmentLastShot_));
+#endif
     for (auto& bytes : segmentRecordBytes_) bytes = sizeof(TelemetryRecord);
     pendingRecordCount_ = 0;
     uint64_t maximumSequence = acknowledgedSequence_;
-    latestSegment_ = 0;
-    bool anySegment = false;
+    writeSegment_ = 0;
+    uint64_t newestStoredSequence = 0;
     for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
         char path[20];
         segmentPath(index, path, sizeof(path));
-        if (!LittleFS.exists(path)) continue;
+        if (!probeSegment(index, segmentPresent_[index])) return false;
+        if (!segmentPresent_[index]) continue;
         File file = LittleFS.open(path, FILE_READ);
-        if (!file) continue;
-        anySegment = true;
-        latestSegment_ = max(latestSegment_, index);
+        if (!file) return false;
         size_t offset = 0;
         TelemetryRecord record;
         while (readRecord(file, record)) {
             if (!valid(record)) break;  // Ignore a torn/corrupt tail; never overwrite it.
             segmentRecordBytes_[index] = file.position() - offset;
             maximumSequence = max(maximumSequence, record.sequence);
+            if (record.sequence > newestStoredSequence) {
+                newestStoredSequence = record.sequence;
+                writeSegment_ = index;
+            }
+#ifdef DEVICE_ARCHIVE_UPLOAD
+            segmentLast_[index] = record.sequence;
+            if (record.shotId) segmentLastShot_[index] = record.sequence;
+#endif
             if (record.sequence > acknowledgedSequence_) {
                 ++pendingRecordCount_;
                 if (!segmentHasPending_[index]) {
@@ -264,8 +299,7 @@ bool TelemetrySpool::scan() {
                                     file.size() <= SEGMENT_BYTES;
         file.close();
     }
-    if (!anySegment) latestSegment_ = 0;
-    nextSequence_ = maximumSequence + 1;
+    nextSequence_ = max(nextSequence_, maximumSequence + 1);
     return true;
 }
 
@@ -290,7 +324,7 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
     record.checksum = checksum(record);
 
     char path[20];
-    uint32_t targetSegment = latestSegment_;
+    uint32_t targetSegment = writeSegment_;
     segmentPath(targetSegment, path, sizeof(path));
     File file;
     bool usableSegment = false;
@@ -310,9 +344,9 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
         bool foundSlot = false;
         for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
             segmentPath(index, path, sizeof(path));
-            if (LittleFS.exists(path)) continue;
+            if (segmentPresent_[index]) continue;
             targetSegment = index;
-            latestSegment_ = max(latestSegment_, index);
+            writeSegment_ = index;
             file = LittleFS.open(path, FILE_WRITE);
             foundSlot = static_cast<bool>(file);
             if (!foundSlot) {
@@ -322,6 +356,10 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
                               static_cast<unsigned long>(index));
                 return false;
             }
+            segmentPresent_[targetSegment] = true;
+#ifdef DEVICE_ARCHIVE_UPLOAD
+            segmentLastShot_[targetSegment] = 0;
+#endif
             break;
         }
         if (!foundSlot) {
@@ -346,6 +384,10 @@ bool TelemetrySpool::append(const TelemetryRecord& sample) {
         segmentHasPending_[targetSegment] = true;
     }
     segmentAppendable_[targetSegment] = true;
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    segmentLast_[targetSegment] = record.sequence;
+    if (record.shotId) segmentLastShot_[targetSegment] = record.sequence;
+#endif
     ++nextSequence_;
     ++pendingRecordCount_;
     if (capacityTestMode_) ++capacityTestCurrentRecordCount_;
@@ -373,7 +415,7 @@ size_t TelemetrySpool::appendBatch(const TelemetryRecord* samples, size_t count)
 
     const size_t requestedBytes = count * sizeof(TelemetryRecord);
     char path[20];
-    uint32_t targetSegment = latestSegment_;
+    uint32_t targetSegment = writeSegment_;
     File file;
     bool usableSegment = false;
     if (segmentAppendable_[targetSegment]) {
@@ -391,9 +433,9 @@ size_t TelemetrySpool::appendBatch(const TelemetryRecord* samples, size_t count)
         bool foundSlot = false;
         for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
             segmentPath(index, path, sizeof(path));
-            if (LittleFS.exists(path)) continue;
+            if (segmentPresent_[index]) continue;
             targetSegment = index;
-            latestSegment_ = max(latestSegment_, index);
+            writeSegment_ = index;
             file = LittleFS.open(path, FILE_WRITE);
             foundSlot = static_cast<bool>(file);
             if (!foundSlot) {
@@ -403,6 +445,10 @@ size_t TelemetrySpool::appendBatch(const TelemetryRecord* samples, size_t count)
                               static_cast<unsigned long>(index));
                 return 0;
             }
+            segmentPresent_[targetSegment] = true;
+#ifdef DEVICE_ARCHIVE_UPLOAD
+            segmentLastShot_[targetSegment] = 0;
+#endif
             break;
         }
         if (!foundSlot) {
@@ -426,6 +472,12 @@ size_t TelemetrySpool::appendBatch(const TelemetryRecord* samples, size_t count)
 
     const size_t committed = min(count, bytesWritten / sizeof(TelemetryRecord));
     if (committed > 0) {
+#ifdef DEVICE_ARCHIVE_UPLOAD
+        segmentLast_[targetSegment] = batch[committed - 1].sequence;
+        for (size_t i = 0; i < committed; ++i) {
+            if (batch[i].shotId) segmentLastShot_[targetSegment] = batch[i].sequence;
+        }
+#endif
         if (!segmentHasPending_[targetSegment]) {
             segmentHeads_[targetSegment] = batch[0];
             segmentOffsets_[targetSegment] = recordOffset;
@@ -466,34 +518,34 @@ bool TelemetrySpool::findPending(TelemetryRecord& sample, uint32_t* foundSegment
     return found;
 }
 
-void TelemetrySpool::advanceSegment(uint32_t segment) {
+bool TelemetrySpool::advanceSegment(uint32_t segment, size_t* exhaustedBytes) {
     char path[20];
     segmentPath(segment, path, sizeof(path));
     File file = LittleFS.open(path, FILE_READ);
     if (!file) {
-        segmentHasPending_[segment] = false;
-        return;
+        return false;
     }
     size_t offset = segmentOffsets_[segment] + segmentRecordBytes_[segment];
     if (!file.seek(offset, SeekSet)) {
         file.close();
-        segmentHasPending_[segment] = false;
-        return;
+        return false;
     }
     TelemetryRecord record;
-    while (readRecord(file, record)) {
-        if (!valid(record)) break;
+    while (file.position() < file.size()) {
+        if (!readRecord(file, record)) return false;
         if (record.sequence > acknowledgedSequence_) {
             segmentHeads_[segment] = record;
             segmentOffsets_[segment] = offset;
             segmentHasPending_[segment] = true;
             file.close();
-            return;
+            return true;
         }
         offset = file.position();
     }
+    if (exhaustedBytes) *exhaustedBytes = file.size();
     file.close();
     segmentHasPending_[segment] = false;
+    return true;
 }
 
 bool TelemetrySpool::peek(TelemetryRecord& sample) {
@@ -537,6 +589,176 @@ uint64_t TelemetrySpool::pendingCount() const {
     return mounted_ ? pendingRecordCount_ : 0;
 }
 
+#ifdef DEVICE_ARCHIVE_UPLOAD
+// Merge segment prefixes by sequence. Filenames are reused and are not time order.
+// Scratch cursors are static to keep the Arduino loop's small stack bounded.
+// Like all spool operations, this is called only by the queue's owner task.
+size_t TelemetrySpool::walkArchiveBatch(TelemetryRecord* output,
+                                      const TelemetryRecord* expected, size_t capacity) {
+    if (!mounted_ || !capacity || capacity > config::ARCHIVE_UPLOAD_BATCH_RECORDS) return 0;
+    static uint64_t heads[SEGMENT_LIMIT];
+    static size_t offsets[SEGMENT_LIMIT];
+    for (uint32_t i = 0; i < SEGMENT_LIMIT; ++i) {
+        heads[i] = segmentHasPending_[i] ? segmentHeads_[i].sequence : 0;
+        offsets[i] = segmentOffsets_[i];
+    }
+    size_t count = 0;
+    while (count < capacity) {
+        uint32_t segment = SEGMENT_LIMIT;
+        uint64_t nextOther = UINT64_MAX;
+        for (uint32_t i = 0; i < SEGMENT_LIMIT; ++i) {
+            if (!heads[i]) continue;
+            if (segment == SEGMENT_LIMIT || heads[i] < heads[segment]) {
+                if (segment != SEGMENT_LIMIT) nextOther = min(nextOther, heads[segment]);
+                segment = i;
+            } else nextOther = min(nextOther, heads[i]);
+        }
+        if (segment == SEGMENT_LIMIT) break;
+        char path[20];
+        segmentPath(segment, path, sizeof(path));
+        File file = LittleFS.open(path, FILE_READ);
+        if (!file || !file.seek(offsets[segment], SeekSet)) return count;
+        heads[segment] = 0;
+        while (file.position() < file.size() && count < capacity) {
+            const size_t offset = file.position();
+            TelemetryRecord record;
+            if (!readRecord(file, record) || record.sequence <= acknowledgedSequence_) return count;
+            if (record.sequence >= nextOther) {
+                heads[segment] = record.sequence;
+                offsets[segment] = offset;
+                break;
+            }
+            if (expected && (expected[count].sequence != record.sequence ||
+                             expected[count].bootId != record.bootId)) return 0;
+            if (output) output[count] = record;
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t TelemetrySpool::peekArchiveBatch(TelemetryRecord* rows, size_t capacity) {
+    return rows ? walkArchiveBatch(rows, nullptr, capacity) : 0;
+}
+
+bool TelemetrySpool::acknowledgeArchiveBatch(const TelemetryRecord* rows, size_t count) {
+    if (!rows || !count || count > config::ARCHIVE_UPLOAD_BATCH_RECORDS) return false;
+    for (size_t i = 1; i < count; ++i) if (rows[i].sequence <= rows[i - 1].sequence) return false;
+    // A local failure may occur after earlier segments in this receipt were reclaimed.
+    // Retrying that same confirmed snapshot must resume, never skip a pending identity.
+    size_t offset = 0;
+    while (offset < count && rows[offset].sequence <= acknowledgedSequence_) ++offset;
+    if (offset == count) return true;
+    if (walkArchiveBatch(nullptr, rows + offset, count - offset) != count - offset) return false;
+    // One durable watermark covers the entire verified FIFO prefix. A power cut
+    // during later file removals is safe: every skipped identity is already in cloud.
+    const uint64_t through = rows[count - 1].sequence;
+    if (persistedAcknowledgedSequence_ < through) {
+        if (preferences.putULong64("acked", through) != sizeof(through)) return false;
+        persistedAcknowledgedSequence_ = through;
+    }
+    batchReclaimLog_ = true;
+    batchReclaimedFiles_ = 0;
+    batchReclaimedBytes_ = 0;
+    bool ok = true;
+    while (offset < count) {
+        uint32_t segment;
+        TelemetryRecord first;
+        if (!findPending(first, &segment, nullptr) || first.sequence != rows[offset].sequence) { ok = false; break; }
+        uint64_t nextOther = UINT64_MAX;
+        for (uint32_t i = 0; i < SEGMENT_LIMIT; ++i) {
+            if (i != segment && segmentHasPending_[i]) nextOther = min(nextOther, segmentHeads_[i].sequence);
+        }
+        uint64_t sequences[config::TELEMETRY_FLASH_BATCH_RECORDS];
+        size_t n = 0;
+        while (offset + n < count && n < config::TELEMETRY_FLASH_BATCH_RECORDS &&
+               rows[offset + n].sequence <= segmentLast_[segment] &&
+               rows[offset + n].sequence < nextOther) {
+            sequences[n] = rows[offset + n].sequence;
+            ++n;
+        }
+        if (!n || !acknowledgeBatch(sequences, n)) { ok = false; break; }
+        offset += n;
+    }
+    batchReclaimLog_ = false;
+    if (batchReclaimedFiles_) {
+        Serial.printf("Flash reclaimed: files=%lu file_bytes=%llu through=%llu\n",
+                      (unsigned long)batchReclaimedFiles_, batchReclaimedBytes_, acknowledgedSequence_);
+    }
+    return ok;
+}
+
+bool TelemetrySpool::sealCollection() {
+    const uint64_t end = lastSequence();
+    if (!mounted_ || preferences.putULong64("closedSeq", end) != sizeof(end)) return false;
+    sealedThrough_ = end;
+    return true;
+}
+
+bool TelemetrySpool::confirmOrdinary(uint64_t through) {
+    if (through <= ordinaryThrough_) return true;
+    if (preferences.putULong64("plainSeq", through) != sizeof(through)) return false;
+    ordinaryThrough_ = through;
+    return true;
+}
+
+bool TelemetrySpool::confirmGps(uint64_t through) {
+    if (through <= gpsThrough_) return true;
+    if (preferences.putULong64("gpsSeq", through) != sizeof(through)) return false;
+    gpsThrough_ = through;
+    return true;
+}
+
+bool TelemetrySpool::readOrdinary(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                                  size_t capacity, size_t& count, uint64_t& scanned) {
+    return readSelected(after, through, rows, capacity, count, scanned, ordinary);
+}
+
+bool TelemetrySpool::readLiveGps(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                                 size_t capacity, size_t& count, uint64_t& scanned) {
+    return readSelected(after, through, rows, capacity, count, scanned, liveGps);
+}
+
+bool TelemetrySpool::readShots(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                               size_t capacity, size_t& count, uint64_t& scanned) {
+    return readSelected(after, through, rows, capacity, count, scanned,
+                        shotRecord);
+}
+
+bool TelemetrySpool::readSelected(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                                  size_t capacity, size_t& count, uint64_t& scanned,
+                                  bool (*include)(const TelemetryRecord&)) {
+    count = 0;
+    scanned = after;
+    if (!mounted_ || capacity == 0) return false;
+    // Segments may be reused out of index order. Keep the earliest eligible identities.
+    for (uint32_t i = 0; i < SEGMENT_LIMIT; ++i) {
+        const uint64_t limit = count == capacity ? rows[count - 1].sequence : through;
+        if (!segmentHasPending_[i] || segmentLast_[i] <= after || segmentHeads_[i].sequence > limit) continue;
+        if (include == shotRecord && segmentLastShot_[i] <= after) continue;
+        char path[20];
+        segmentPath(i, path, sizeof(path));
+        File f = LittleFS.open(path, FILE_READ);
+        if (!f || !f.seek(segmentOffsets_[i], SeekSet)) return false;
+        TelemetryRecord r;
+        do {
+            if (!readRecord(f, r)) return false;
+            if (r.sequence > through || (count == capacity && r.sequence >= rows[count - 1].sequence)) break;
+            if (r.sequence > after && include(r)) {
+                size_t j = count < capacity ? count++ : capacity - 1;
+                while (j && rows[j - 1].sequence > r.sequence) {
+                    rows[j] = rows[j - 1];
+                    --j;
+                }
+                rows[j] = r;
+            }
+        } while (r.sequence < segmentLast_[i]);
+    }
+    scanned = count == capacity ? rows[count - 1].sequence : through;
+    return true;
+}
+#endif
+
 void TelemetrySpool::latchCapacityTestFull() {
     if (!capacityTestMode_ || capacityTestResultSaved_) return;
 
@@ -565,14 +787,21 @@ bool TelemetrySpool::acknowledge(uint64_t sequence) {
     uint32_t segment = 0;
     if (!findPending(pending, &segment, nullptr) || pending.sequence != sequence) return false;
     const uint64_t previousAcknowledgedSequence = acknowledgedSequence_;
+    const size_t previousOffset = segmentOffsets_[segment];
+    size_t exhaustedBytes = 0;
     acknowledgedSequence_ = sequence;
-    advanceSegment(segment);
+    if (!advanceSegment(segment, &exhaustedBytes)) {
+        acknowledgedSequence_ = previousAcknowledgedSequence;
+        return false;
+    }
     if (!segmentHasPending_[segment]) {
         if (persistedAcknowledgedSequence_ < acknowledgedSequence_) {
             if (preferences.putULong64("acked", acknowledgedSequence_) != sizeof(uint64_t)) {
                 // Restore the pending segment in RAM so a failed NVS write can be retried.
                 acknowledgedSequence_ = previousAcknowledgedSequence;
-                scan();
+                segmentHeads_[segment] = pending;
+                segmentOffsets_[segment] = previousOffset;
+                segmentHasPending_[segment] = true;
                 return false;
             }
             persistedAcknowledgedSequence_ = acknowledgedSequence_;
@@ -580,9 +809,21 @@ bool TelemetrySpool::acknowledge(uint64_t sequence) {
         char path[20];
         segmentPath(segment, path, sizeof(path));
         if (LittleFS.remove(path)) {
+            segmentPresent_[segment] = false;
             segmentAppendable_[segment] = false;
             if (!capacityTestFull_) full_ = false;
             clearStorageFullSnapshotIfSpaceAvailable();
+#ifdef DEVICE_ARCHIVE_UPLOAD
+            if (batchReclaimLog_) {
+                ++batchReclaimedFiles_;
+                batchReclaimedBytes_ += exhaustedBytes;
+            } else
+#endif
+            Serial.printf("Flash reclaimed: segment=%lu file_bytes=%lu through=%llu\n",
+                          static_cast<unsigned long>(segment),
+                          static_cast<unsigned long>(exhaustedBytes), sequence);
+        } else {
+            Serial.printf("Flash reclaim deferred: segment=%lu\n", static_cast<unsigned long>(segment));
         }
     }
     if (pendingRecordCount_ > 0) --pendingRecordCount_;
@@ -597,14 +838,17 @@ bool TelemetrySpool::acknowledgeBatch(const uint64_t* sequences, size_t count) {
         if (records[i].sequence != sequences[i]) return false;
     }
     uint32_t segment = 0;
+    size_t offset = 0;
     TelemetryRecord first;
-    if (!findPending(first, &segment, nullptr)) return false;
+    if (!findPending(first, &segment, &offset)) return false;
     // peekBatch is confined to one segment. Skip its acknowledged prefix in RAM,
     // then reuse the existing durable watermark/reclamation path once per batch.
     segmentHeads_[segment] = records[count - 1];
     segmentOffsets_[segment] += (count - 1) * segmentRecordBytes_[segment];
     if (!acknowledge(sequences[count - 1])) {
-        scan();
+        segmentHeads_[segment] = first;
+        segmentOffsets_[segment] = offset;
+        segmentHasPending_[segment] = true;
         return false;
     }
     pendingRecordCount_ -= count - 1;
@@ -612,9 +856,10 @@ bool TelemetrySpool::acknowledgeBatch(const uint64_t* sequences, size_t count) {
 }
 
 bool TelemetrySpool::compactAcknowledgedSegments() {
+    if (!mounted_) return false;
     bool changed = false;
-    for (uint32_t index = 0; index <= latestSegment_; ++index) {
-        if (segmentHasPending_[index]) continue;
+    for (uint32_t index = 0; index < SEGMENT_LIMIT; ++index) {
+        if (!segmentPresent_[index] || segmentHasPending_[index]) continue;
         char path[20];
         segmentPath(index, path, sizeof(path));
         File file = LittleFS.open(path, FILE_READ);
@@ -622,11 +867,12 @@ bool TelemetrySpool::compactAcknowledgedSegments() {
         bool hasValidRecord = false;
         bool allAcknowledged = true;
         TelemetryRecord record;
-        while (readRecord(file, record)) {
-            if (!valid(record)) break;
+        while (file.position() < file.size()) {
+            if (!readRecord(file, record)) { allAcknowledged = false; break; }
             hasValidRecord = true;
             if (record.sequence > acknowledgedSequence_) allAcknowledged = false;
         }
+        const size_t fileBytes = file.size();
         file.close();
         if (hasValidRecord && allAcknowledged) {
             // Persist the reclaim watermark before deleting the segment. If power fails,
@@ -638,8 +884,12 @@ bool TelemetrySpool::compactAcknowledgedSegments() {
                 persistedAcknowledgedSequence_ = acknowledgedSequence_;
             }
             if (LittleFS.remove(path)) {
+                segmentPresent_[index] = false;
                 segmentAppendable_[index] = false;
                 changed = true;
+                Serial.printf("Flash reclaimed: segment=%lu file_bytes=%lu through=%llu\n",
+                              static_cast<unsigned long>(index),
+                              static_cast<unsigned long>(fileBytes), acknowledgedSequence_);
             }
         }
     }

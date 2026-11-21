@@ -30,6 +30,29 @@ static_assert(sizeof(TelemetryRecord) == 90 && offsetof(TelemetryRecord, bootId)
 
 class TelemetrySpool {
 public:
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    bool sealCollection();
+    uint64_t sealedThrough() const { return sealedThrough_; }
+    uint64_t ordinaryThrough() const { return ordinaryThrough_; }
+    uint64_t gpsThrough() const { return gpsThrough_; }
+    bool confirmOrdinary(uint64_t through);
+    bool confirmGps(uint64_t through);
+    bool readOrdinary(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                      size_t capacity, size_t& count, uint64_t& scanned);
+    bool readLiveGps(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                     size_t capacity, size_t& count, uint64_t& scanned);
+    bool readShots(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                   size_t capacity, size_t& count, uint64_t& scanned);
+    bool reclaimAcknowledged() { return compactAcknowledgedSegments(); }
+    size_t peekArchiveBatch(TelemetryRecord* rows, size_t capacity);
+    bool acknowledgeArchiveBatch(const TelemetryRecord* rows, size_t count);
+    static bool ordinary(const TelemetryRecord& r) {
+        return r.recordKind == 1 && !r.shotId;
+    }
+    static bool liveGps(const TelemetryRecord& r) {
+        return r.recordKind == 2 && !r.shotId && r.gpsValid;
+    }
+#endif
     bool begin(bool capacityTestMode = false);
     bool append(const TelemetryRecord& sample);
     size_t appendBatch(const TelemetryRecord* samples, size_t count);
@@ -54,6 +77,19 @@ public:
     uint64_t lastSequence() const { return nextSequence_ ? nextSequence_ - 1 : 0; }
 
 private:
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    uint64_t sealedThrough_ = 0, ordinaryThrough_ = 0, gpsThrough_ = 0;
+    uint64_t segmentLast_[512] = {};
+    uint64_t segmentLastShot_[512] = {};
+    static bool shotRecord(const TelemetryRecord& row) { return row.shotId != 0; }
+    bool batchReclaimLog_ = false;
+    uint32_t batchReclaimedFiles_ = 0;
+    uint64_t batchReclaimedBytes_ = 0;
+    size_t walkArchiveBatch(TelemetryRecord* output, const TelemetryRecord* expected, size_t capacity);
+    bool readSelected(uint64_t after, uint64_t through, TelemetryRecord* rows,
+                      size_t capacity, size_t& count, uint64_t& scanned,
+                      bool (*include)(const TelemetryRecord&));
+#endif
     static constexpr size_t SEGMENT_BYTES = 32768;
     static constexpr uint32_t LITTLEFS_WRITE_RESERVE_BYTES = 8192;
     static constexpr uint32_t RECORD_MAGIC = 0x544C4D32;
@@ -63,15 +99,16 @@ private:
     static bool valid(const TelemetryRecord& record);
     static bool readRecord(fs::File& file, TelemetryRecord& record);
     static void segmentPath(uint32_t index, char* path, size_t size);
+    static bool probeSegment(uint32_t index, bool& present);
     bool scan();
     bool reserveSequenceBlock();
     bool compactAcknowledgedSegments();
     void latchStorageFullSnapshot();
     void clearStorageFullSnapshotIfSpaceAvailable();
     bool findPending(TelemetryRecord& sample, uint32_t* segment, size_t* offset);
-    void advanceSegment(uint32_t segment);
+    bool advanceSegment(uint32_t segment, size_t* exhaustedBytes = nullptr);
 
-    uint32_t latestSegment_ = 0;
+    uint32_t writeSegment_ = 0; // Newest record's segment; not the highest filename.
     uint64_t nextSequence_ = 1;
     uint64_t reservedSequenceEnd_ = 1;
     uint64_t acknowledgedSequence_ = 0;
@@ -89,6 +126,7 @@ private:
     size_t segmentRecordBytes_[SEGMENT_LIMIT] = {};
     bool segmentHasPending_[SEGMENT_LIMIT] = {};
     bool segmentAppendable_[SEGMENT_LIMIT] = {};
+    bool segmentPresent_[SEGMENT_LIMIT] = {}; // Owner-maintained index; no periodic disk probes.
     bool mounted_ = false;
     bool full_ = false;
     bool capacityTestMode_ = false;

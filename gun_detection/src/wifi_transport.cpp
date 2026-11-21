@@ -1,4 +1,8 @@
 #include "wifi_transport.h"
+#ifdef DEVICE_ARCHIVE_UPLOAD
+#include "archive_upload.h"
+#include <sys/time.h>
+#endif
 
 #include <esp_timer.h>
 #include <esp_system.h>
@@ -40,6 +44,8 @@ void WifiTransport::begin() {
     bootId_ = (static_cast<uint64_t>(esp_random()) << 32) | esp_random();
     if (bootId_ == 0) bootId_ = 1;
     spool_.begin(config::CAPACITY_TEST_MODE);
+    // Flash recovery may take several seconds; start periodic recording after it finishes.
+    recordingSchedule_.reset(millis());
     enabled_ = config::WIFI_SSID[0] != '\0';
     if (!enabled_) {
         Serial.println("Wi-Fi upload disabled: configure WIFI_SSID.");
@@ -51,7 +57,11 @@ void WifiTransport::begin() {
         return;
     }
     WiFi.mode(WIFI_STA);
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    WiFi.setSleep(false); // Prefer cloud transfer latency while the radio is enabled.
+#else
     WiFi.setSleep(!uploadOnly_);
+#endif
     WiFi.setAutoReconnect(true);
     WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
     radioEnabled_ = true;
@@ -161,10 +171,18 @@ void WifiTransport::update(uint32_t nowMs) {
     const uint32_t spoolIntervalMs = lowPowerMode_
         ? config::LOW_POWER_SENSOR_RECORD_INTERVAL_MS
         : config::TELEMETRY_SPOOL_INTERVAL_MS;
+    // GPS parsing and other loop work may take time after the caller sampled nowMs.
+    const uint32_t recorderNowMs = millis();
     const RecordingSchedule::Due due = recordingSchedule_.poll(
-        nowMs, spoolIntervalMs,
+        recorderNowMs, spoolIntervalMs,
         !config::CAPACITY_TEST_MODE && !uploadOnly_ && !lowPowerMode_ && config::NORMAL_GPS_ALWAYS_ON,
         config::NORMAL_GPS_TRACK_INTERVAL_MS);
+    if (due.sensors && !uploadOnly_ && !config::CAPACITY_TEST_MODE &&
+        (due.sensorLateMs > 1000 || due.sensorSkipped)) {
+        Serial.printf("Sensor recording delayed: late=%lu ms skipped=%lu intervals\n",
+                      static_cast<unsigned long>(due.sensorLateMs),
+                      static_cast<unsigned long>(due.sensorSkipped));
+    }
     if (!uploadOnly_ && due.sensors) {
         if (!spool_.capacityTestFull()) {
             TelemetryRecord record = makeTelemetryRecord(telemetry_);
@@ -174,7 +192,7 @@ void WifiTransport::update(uint32_t nowMs) {
             }
         }
     }
-    if (due.track && !spool_.capacityTestFull() &&
+    if (due.track && telemetry_.gpsValid && !spool_.capacityTestFull() &&
         pendingFlashRecordCount_ < config::TELEMETRY_FLASH_BATCH_RECORDS) {
         // A GPS-only record never manufactures an extra microphone/ADC sample.
         TelemetryRecord record;
@@ -187,10 +205,11 @@ void WifiTransport::update(uint32_t nowMs) {
         record.recordKind = 2;
         pendingFlashRecords_[pendingFlashRecordCount_++] = record;
     }
-    // Daily 10-second records flush immediately in either motion state.
-    // Only the high-rate capacity test batches writes.
+    // Flush each ordinary sample promptly, including any GPS points collected
+    // since the preceding sample. Capacity tests retain their 20-record batch.
     if (pendingFlashRecordCount_ > 0 && !spool_.full() && !spool_.capacityTestFull() &&
-        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS || !config::CAPACITY_TEST_MODE || lowPowerMode_ || uploadOnly_)) {
+        (pendingFlashRecordCount_ >= config::TELEMETRY_FLASH_BATCH_RECORDS ||
+         (!config::CAPACITY_TEST_MODE && due.sensors) || lowPowerMode_ || uploadOnly_)) {
         flushPendingTelemetry();
     }
     if (spool_.full() && spool_.capacityTestMode() && !spool_.capacityTestResultSaved()) {
@@ -206,7 +225,11 @@ void WifiTransport::update(uint32_t nowMs) {
         nowMs, WiFi.status() == WL_CONNECTED, gestureWifiHoldMs_,
         config::NORMAL_WIFI_CONNECT_TIMEOUT_MS);
     bool radioShouldBeOn = enabled_ && (uploadOnly_ || config::NORMAL_WIFI_ALWAYS_ON || gestureWifi);
-    if (enabled_ && lowPowerMode_ && !uploadOnly_) {
+    if (enabled_ && lowPowerMode_ && !uploadOnly_
+#ifdef DEVICE_ARCHIVE_UPLOAD
+        && !config::NORMAL_WIFI_ALWAYS_ON
+#endif
+    ) {
         if (!config::LOW_POWER_WIFI_CYCLE_ENABLED) {
             radioShouldBeOn = gestureWifi;
         } else {
@@ -214,11 +237,56 @@ void WifiTransport::update(uint32_t nowMs) {
             radioShouldBeOn = gestureWifi || phaseMs < config::LOW_POWER_WIFI_WINDOW_MS;
         }
     }
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    // USB bench command T temporarily interrupts only this board's wireless connection.
+    static bool testing = false;
+    static uint32_t testStart = 0;
+    // A USB host can supply UTC if the test network filters NTP and GPS has no fix.
+    static char usbClock[11];
+    static int clockDigits = -1;
+    int command = Serial.available() ? Serial.read() : -1;
+    if (command == '@') {
+        clockDigits = 0;
+    } else if (clockDigits >= 0 && command >= 0) {
+        if (command == '\n' && clockDigits == 10) {
+            usbClock[10] = 0;
+            const int64_t utc = strtoll(usbClock, nullptr, 10);
+            if (utc >= 1704067200 && utc <= 2147483647) {
+                timeval tv{static_cast<time_t>(utc), 0};
+                if (settimeofday(&tv, nullptr) == 0) Serial.println("USB UTC synchronized.");
+            }
+            clockDigits = -1;
+        } else if (command >= '0' && command <= '9' && clockDigits < 10) {
+            usbClock[clockDigits++] = static_cast<char>(command);
+        } else {
+            clockDigits = -1;
+        }
+    }
+    if (command == 'R') {
+        testArchiveReplayOnce();
+        Serial.println("USB test: repeat next archive batch; Wi-Fi stays on.");
+    }
+    if (command == 'T' && !testing) {
+        testStart = nowMs;
+        testing = true;
+        testArchiveReplayOnce();
+        Serial.println("USB test: Wi-Fi off for 25 seconds; Flash recording continues.");
+    }
+    if (testing) {
+        const uint32_t elapsed = nowMs - testStart;
+        if (elapsed < 180000) radioShouldBeOn = elapsed >= 25000;
+        else testing = false;
+    }
+#endif
     if (radioShouldBeOn != radioEnabled_) {
         if (radioShouldBeOn) {
             WiFi.mode(WIFI_STA);
             WiFi.setAutoReconnect(true);
+#ifdef DEVICE_ARCHIVE_UPLOAD
+            WiFi.setSleep(false);
+#else
             WiFi.setSleep(!uploadOnly_);
+#endif
             WiFi.begin(config::WIFI_SSID, config::WIFI_PASSWORD);
             lastConnectAttemptMs_ = nowMs;
             radioEnabled_ = true;
@@ -240,12 +308,24 @@ void WifiTransport::update(uint32_t nowMs) {
     }
 
     const bool isConnected = WiFi.status() == WL_CONNECTED;
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    // Drain the backlog present on reconnection; the next offline period has its own watermark.
+    static uint64_t lastOfflineSequence = 0;
+    if (isConnected && !wasConnected_) {
+        lastOfflineSequence = spool_.lastSequence();
+        Serial.printf("Archive reconnect: pending=%llu through=%llu\n", spool_.pendingCount(), lastOfflineSequence);
+    }
+#endif
     if (isConnected != wasConnected_) {
         wasConnected_ = isConnected;
         if (isConnected) {
             resetDiscovery(nowMs);
             // NTP 使用 UTC 校准系统时钟；时间戳格式化时再转换为北京时间。
+#ifdef DEVICE_ARCHIVE_UPLOAD
+            configTime(0, 0, "ntp.aliyun.com", "ntp.tencent.com", config::NTP_SERVER);
+#else
             configTime(0, 0, config::NTP_SERVER);
+#endif
             Serial.printf("NTP time synchronization started: %s\n", config::NTP_SERVER);
             ackListenerStarted_ = udp_.begin(config::DEVICE_UDP_PORT);
             if (!ackListenerStarted_) {
@@ -272,6 +352,10 @@ void WifiTransport::update(uint32_t nowMs) {
         return;
     }
 
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    updateArchiveUpload(spool_);
+    return;
+#endif
     if (!ackListenerStarted_) {
         ackListenerStarted_ = udp_.begin(config::DEVICE_UDP_PORT);
         if (!ackListenerStarted_) return;
@@ -581,12 +665,19 @@ bool WifiTransport::enqueue(const ShotEvent& event) {
     location.latitude = event.gps.latitude;
     location.longitude = event.gps.longitude;
     location.gpsValid = event.gps.valid ? 1 : 0;
-    if (!spool_.append(location)) {
+    const bool stored = spool_.append(location);
+    if (!stored) {
         Serial.println("Shot location could not be persisted (storage unavailable/full).");
     }
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    // Cloud events are delivered from the durable queue, not the unused UDP queue.
+    lastShotCount_ = event.shotCount;
+    return stored;
+#else
     if (!enqueueEvent(queued)) return false;
     lastShotCount_ = event.shotCount;
     return true;
+#endif
 }
 
 bool WifiTransport::enqueueVoiceDetection(const VoiceEvent& event, uint32_t detectionCount) {
@@ -609,6 +700,11 @@ bool WifiTransport::enqueueVibrationDetection(const VibrateEvent& event,
 }
 
 bool WifiTransport::enqueueEvent(const QueuedEvent& event) {
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    // Voice/vibration diagnostics are printed locally; no UDP consumer runs here.
+    (void)event;
+    return false;
+#endif
     if (!enabled_) return false;
     if (count_ >= QUEUE_SIZE) {
         ++droppedEvents_;

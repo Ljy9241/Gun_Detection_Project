@@ -8,3 +8,8 @@
 /output/
 /.ppt_build/
 /tmp/
+/cloud_backend/.venv/
+/cloud_backend/runtime/
+/cloud_backend/**/__pycache__/
+/.pytest_cache/
+/gun_detection/include/cloud_device_private.h

@@ -1,0 +1,33 @@
+[Unit]
+Description=Gun telemetry receiver (private staging endpoint)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=gun-receiver
+Group=gun-receiver
+WorkingDirectory=/opt/gun-receiver/current
+EnvironmentFile=/etc/gun-receiver.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/gun-receiver/current/.venv/bin/python -m uvicorn cloud_backend.main:app --host 127.0.0.1 --port 18000 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StateDirectory=gun-receiver
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/gun-receiver
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+MemoryHigh=192M
+MemoryMax=256M
+TasksMax=64
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

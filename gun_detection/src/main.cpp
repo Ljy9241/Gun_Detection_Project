@@ -73,6 +73,7 @@ struct SensorSnapshot {
     MotionEvent motionEvent;
     bool hasMotionEvent = false;
     bool classifyingMotion = false;
+    bool motionCalibrated = false;
     VoiceEvent voiceEvent;
     VibrateEvent vibrationEvent;
     uint16_t micRaw = 0;
@@ -134,6 +135,7 @@ static SensorSnapshot captureSensorSnapshot() {
     portENTER_CRITICAL(&sensorStateMux);
     snapshot.hasMotionEvent = motionDetection.consumeEvent(snapshot.motionEvent);
     snapshot.classifyingMotion = motionDetection.classifying();
+    snapshot.motionCalibrated = motionDetection.calibrated();
     snapshot.hasVoiceEvent = voiceDetection.consumeEvent(snapshot.voiceEvent);
     snapshot.hasVibrationEvent = vibrateDetection.consumeEvent(snapshot.vibrationEvent);
     snapshot.micRaw = voiceDetection.latestRaw();
@@ -331,6 +333,14 @@ static bool serviceNightStandby(uint32_t nowMs) {
         if (gpsSnapshotPending) {
             Serial.println("Night standby: uncommitted GPS snapshot retained in RAM.");
         }
+#ifdef DEVICE_ARCHIVE_UPLOAD
+        // Persist the collection boundary for diagnostics; live uploads do not wait for it.
+        if (wifiTransport.pendingRamRecords() == 0 && !gpsSnapshotPending && !wifiTransport.sealCollection()) {
+            Serial.println("Collection end marker could not be persisted; retrying before standby.");
+            delay(100);
+            return true;
+        }
+#endif
         // Hold both peripheral enable pins LOW throughout light sleep.
         gpio_hold_en(static_cast<gpio_num_t>(config::MMA_SLEEP_PIN));
         gpio_hold_en(static_cast<gpio_num_t>(config::GPS_ENABLE_PIN));
@@ -605,7 +615,7 @@ void loop() {
         lastDiagnosticMs = nowMs;
         Serial.printf(
             "mic[raw=%u p2p=%u rms=%.1f] mma[%s x=%u y=%u z=%u mag=%.1f jerk=%.1f] "
-            "flags[%d,%d] power[%s] gps[%s sats=%lu chars=%lu] wifi[%s] "
+            "flags[%d,%d] motion[cal=%d active=%d shots=%lu] power[%s] gps[%s sats=%lu chars=%lu] wifi[%s] "
             "heap[free=%lu min=%lu] adc[overrun=%lu] spool[written=%lu rate=%lu/s] "
             "udp[q=%u shot=%lu status=%lu fail=%lu drop=%lu] "
             "dropped[%lu,%lu]\n",
@@ -613,7 +623,9 @@ void loop() {
             sensors.micRms, sensors.vibrationReady ? "ready" : "cal",
             sensors.vibrationX, sensors.vibrationY, sensors.vibrationZ,
             sensors.vibrationMagnitude, sensors.vibrationJerk, sensors.hasVoiceEvent,
-            sensors.hasVibrationEvent, lowPowerMode ? "low" : "normal", fix.valid ? "fix" : "search",
+            sensors.hasVibrationEvent, sensors.motionCalibrated, sensors.classifyingMotion,
+            static_cast<unsigned long>(shotDetector.shotCount()),
+            lowPowerMode ? "low" : "normal", fix.valid ? "fix" : "search",
             static_cast<unsigned long>(fix.satellites),
             static_cast<unsigned long>(gps.parsedCharacters()),
             wifiTransport.connected() ? "connected" :

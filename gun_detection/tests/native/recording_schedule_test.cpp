@@ -11,6 +11,21 @@ int main() {
         if (due.track) { assert(now % 1000 == 0); ++track; }
     }
     assert(sensors == 2 && track == 20);
+    // Loop jitter must not accumulate into an 11-second recording period.
+    RecordingSchedule paced;
+    paced.reset(0);
+    auto jitter = paced.poll(10037, 10000, true, 1000);
+    assert(jitter.sensors && jitter.sensorLateMs == 37 && jitter.sensorSkipped == 0);
+    assert(!paced.poll(19999, 10000, true, 1000).sensors);
+    jitter = paced.poll(20042, 10000, true, 1000);
+    assert(jitter.sensors && jitter.sensorLateMs == 42);
+    jitter = paced.poll(37000, 10000, true, 1000);
+    assert(jitter.sensors && jitter.sensorLateMs == 7000 && jitter.sensorSkipped == 0);
+    jitter = paced.poll(40003, 10000, true, 1000);
+    assert(jitter.sensors && jitter.sensorLateMs == 3);
+    jitter = paced.poll(72000, 10000, true, 1000);
+    assert(jitter.sensors && jitter.sensorLateMs == 2000 && jitter.sensorSkipped == 2);
+    assert(paced.poll(80050, 10000, true, 1000).sensors);
     // Low-power mode stops the 1-second track without changing sensor timing.
     assert(!clock.poll(21000, 10000, false, 1000).track);
     assert(clock.poll(30000, 10000, false, 1000).sensors);

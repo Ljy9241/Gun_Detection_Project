@@ -52,6 +52,9 @@ public:
     TelemetryRecord makeTelemetryRecord(const WifiTelemetry& telemetry) const;
     bool appendTelemetrySnapshot(const TelemetryRecord& record);
     bool flushPendingTelemetry();
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    bool sealCollection() { return spool_.sealCollection(); }
+#endif
     void setScheduledStandby(bool standby, uint32_t nowMs);
     void setLowPowerMode(bool enabled, uint32_t nowMs);
     void onMotionDirection(MotionDirection direction, uint32_t nowMs);

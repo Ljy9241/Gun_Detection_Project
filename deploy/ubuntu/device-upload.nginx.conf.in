@@ -1,0 +1,26 @@
+# Render TEST_WIFI_IPV4 and install after provisioning the IP certificate.
+server {
+    listen 443 ssl;
+    server_name 39.106.146.122;
+
+    ssl_certificate     /etc/gun-receiver/tls/chain.pem;
+    ssl_certificate_key /etc/gun-receiver/tls/server.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    client_max_body_size 64k;
+    client_body_timeout 15s;
+
+    location = /device/v1/batches {
+        allow TEST_WIFI_IPV4/32;
+        deny all;
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:18000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_read_timeout 30s;
+    }
+
+    location / {
+        return 404;
+    }
+}

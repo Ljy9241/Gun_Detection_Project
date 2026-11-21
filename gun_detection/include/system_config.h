@@ -11,14 +11,17 @@
 
 namespace config {
 
+// Cloud protocol accepts at most 64 records. Independent of Flash write batching.
+inline constexpr size_t ARCHIVE_UPLOAD_BATCH_RECORDS = 64;
+
 inline constexpr bool CAPACITY_TEST_MODE = GUN_CAPACITY_TEST_MODE != 0;
 
 // 每日北京时间定时待机；只在已有有效 GPS/NTP 日历时间后启用。
 inline constexpr bool NIGHT_STANDBY_ENABLED = true;//是否启用定时休眠
-inline constexpr uint8_t NIGHT_STANDBY_END_HOUR = 23;       // 几点工作：小时 0~23。
+inline constexpr uint8_t NIGHT_STANDBY_END_HOUR = 10;       // 几点工作：小时 0~23。
 inline constexpr uint8_t NIGHT_STANDBY_END_MIN = 00;        // 几点工作：分钟 0~59。
-inline constexpr uint8_t NIGHT_STANDBY_START_HOUR = 11;    // 几点休眠：小时 0~23。
-inline constexpr uint8_t NIGHT_STANDBY_START_MIN = 40;      // 几点休眠：分钟 0~59。
+inline constexpr uint8_t NIGHT_STANDBY_START_HOUR = 9;    // 几点休眠：小时 0~23。
+inline constexpr uint8_t NIGHT_STANDBY_START_MIN = 59;      // 几点休眠：分钟 0~59。
 static_assert(NIGHT_STANDBY_START_HOUR < 24 && NIGHT_STANDBY_END_HOUR < 24 &&
               NIGHT_STANDBY_START_MIN < 60 && NIGHT_STANDBY_END_MIN < 60,
               "Standby hours must be 0-23 and minutes 0-59");
