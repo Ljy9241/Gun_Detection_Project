@@ -19,7 +19,7 @@ struct __attribute__((packed)) TelemetryRecord {
     double longitude = 0.0;
     uint8_t gpsValid = 0;
     uint8_t recordKind = 0; // 0: legacy/combined snapshot, 1: sensors, 2: GPS track.
-    uint8_t reserved[2] = {}; // Preserve existing TLM2 byte layout and checksums.
+    uint8_t reserved[2] = {}; // [0]=1: accel slots hold offset centidegrees roll/pitch and validity.
     uint64_t bootId = 0;
     uint64_t uptimeMs = 0;
     uint32_t shotId = 0;  // Nonzero: durable shot location, not a sensor sample.

@@ -19,6 +19,10 @@ BASE = "/viewer/"
 COOKIE = "__Secure-unit-view"
 PAGE_SIZE = 25
 KINDS = {"sensor": "普通采样", "shot": "射击事件"}
+# Hide retired test devices in the viewer without deleting their stored records.
+# Set VIEWER_HIDDEN_DEVICES to an empty string to show every device again.
+HIDDEN_DEVICES = tuple(value.strip() for value in
+                       os.environ.get("VIEWER_HIDDEN_DEVICES", "pilot-001").split(",") if value.strip())
 sessions = {}
 TZ = timezone(timedelta(hours=8))
 MAP_TEMPLATE = Path(__file__).with_name("viewer_map.html")
@@ -138,9 +142,9 @@ def authorized_unit(request):
 def map_sessions(conn, tenant_id):
     return conn.execute("""SELECT device_id,storage_epoch,boot_id,COUNT(*) AS count,
         MIN(event_date) AS day,MAX(received_at) AS last_received
-        FROM records WHERE tenant_id=? AND """ + VALID_GPS + """
+        FROM records WHERE tenant_id=? AND device_id NOT IN (SELECT value FROM json_each(?)) AND """ + VALID_GPS + """
         GROUP BY device_id,storage_epoch,boot_id HAVING COUNT(*)>=3
-        ORDER BY last_received DESC""", (tenant_id,)).fetchall()
+        ORDER BY last_received DESC""", (tenant_id, json.dumps(HIDDEN_DEVICES))).fetchall()
 
 
 @app.get(BASE + "map")
@@ -183,6 +187,8 @@ def map_track(request: Request, device: str, epoch: str, boot: str):
     unit = authorized_unit(request)
     if not unit:
         return JSONResponse({"error": "请重新登录"}, status_code=401)
+    if device in HIDDEN_DEVICES:
+        return JSONResponse({"error": "设备不可见"}, status_code=404)
     with closing(db()) as conn:
         conn.execute("BEGIN")
         eligible = conn.execute("""SELECT COUNT(*) FROM records WHERE tenant_id=? AND
@@ -218,11 +224,19 @@ def render_row(row, show_event_number=False):
     coordinates = "—"
     if payload.get("gpsValid") and payload.get("latitude") is not None and payload.get("longitude") is not None:
         coordinates = f'{payload["latitude"]:.7f}, {payload["longitude"]:.7f}'
-    readings = ("accel_x", "accel_y", "accel_z", "mic_raw", "mic_p2p", "mic_rms")
+    readings = ("mic_raw", "mic_p2p", "mic_rms")
     kind_label = KINDS.get(row["kind"], row["kind"])
     if row["kind"] == "shot" and not show_event_number and payload.get("shotId"):
         kind_label += f'（编号 {payload["shotId"]}）'
-    values = [row["device_id"], kind_label, received, payload.get("timestamp", "—")]
+    stamp = payload.get("timestamp", "—")
+    if payload.get("timestamp_source") == "inferred":
+        stamp += "（推算）"
+    values = [row["device_id"], kind_label, received, stamp]
+    if row["kind"] == "sensor" and payload.get("tilt_valid"):
+        values.extend([f'{payload["roll_deg"]:.2f}°',
+                       f'{payload["pitch_deg"]:.2f}°'])
+    else:
+        values.extend(["—", "—"])
     values.extend(payload.get(field, "—") if row["kind"] == "sensor" else "—" for field in readings)
     values.append(coordinates)
     if show_event_number:
@@ -242,7 +256,7 @@ def view(request: Request, device: str = "", day: str = "", kind: str = "", p: i
             return login_form("查询权限已失效")
         if kind == "gps":
             return RedirectResponse(BASE + "map", status_code=303)
-        devices = conn.execute("SELECT id,name FROM devices WHERE tenant_id=? ORDER BY id",(unit["id"],)).fetchall()
+        devices = conn.execute("SELECT id,name FROM devices WHERE tenant_id=? AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY id",(unit["id"], json.dumps(HIDDEN_DEVICES))).fetchall()
         try:
             if day: day = date.fromisoformat(day).isoformat()
             if kind and kind not in KINDS: raise ValueError()
@@ -254,8 +268,9 @@ def view(request: Request, device: str = "", day: str = "", kind: str = "", p: i
         except ValueError:
             return page('<p>筛选条件无效。</p><a href="/viewer/">返回记录</a>', unit["name"], 400)
         snapshot = min(stamp.astimezone(timezone.utc), datetime.now(timezone.utc)).isoformat()
-        clauses = ["tenant_id=?", "received_at<=?", "kind IN ('sensor','shot')"]
-        args = [unit["id"], snapshot]
+        clauses = ["tenant_id=?", "received_at<=?", "kind IN ('sensor','shot')",
+                   "device_id NOT IN (SELECT value FROM json_each(?))"]
+        args = [unit["id"], snapshot, json.dumps(HIDDEN_DEVICES)]
         for column, value in (("device_id",device),("event_date",day),("kind",kind)):
             if value:
                 clauses.append(column+"=?")
@@ -265,13 +280,15 @@ def view(request: Request, device: str = "", day: str = "", kind: str = "", p: i
         pages = max(1,(total+PAGE_SIZE-1)//PAGE_SIZE)
         p = max(1,min(p,pages))
         rows = conn.execute("SELECT device_id,kind,received_at,payload FROM records WHERE "+where+
-            " ORDER BY device_id,storage_epoch DESC,LENGTH(sequence) DESC,sequence DESC,id DESC"
+            " ORDER BY (event_date IS NULL),"
+            " CASE WHEN event_date IS NOT NULL THEN json_extract(payload,'$.timestamp') END DESC,"
+            " device_id,storage_epoch,LENGTH(sequence) DESC,sequence DESC,id DESC"
             " LIMIT ? OFFSET ?",args+[PAGE_SIZE,(p-1)*PAGE_SIZE]).fetchall()
     devopts = option("", "全部设备", device) + "".join(option(d["id"], d["name"]+" · "+d["id"], device) for d in devices)
     kinds = option("", "全部类型", kind) + "".join(option(k,v,kind) for k,v in KINDS.items())
     show_event_number = kind == "shot"
     event_header = '<th>事件编号</th>' if show_event_number else ''
-    column_count = 12 if show_event_number else 11
+    column_count = 11 if show_event_number else 10
     def link(number,label):
         params=urlencode(dict(device=device,day=day,kind=kind,p=number,snapshot=snapshot))
         return '<a href="?'+h(params)+'">'+label+'</a>'
@@ -280,8 +297,8 @@ def view(request: Request, device: str = "", day: str = "", kind: str = "", p: i
             '<label>采集日期<input type="date" name="day" value="'+h(day)+'"></label>'
             '<label>记录类型<select name="kind">'+kinds+'</select></label><button>查询</button>'
             '<a href="/viewer/">查看全部</a><a href="/viewer/map">GPS 轨迹地图</a></form><section class="panel"><div class="summary">'
-            '<h2>查询结果</h2><span>共 '+str(total)+' 条 · 按设备和存储批次分组，组内按采集序号倒序</span></div><div class="scroll"><table>'
-            '<thead><tr><th>设备</th><th>类型</th><th>接收时间（北京）</th><th>采集时间</th><th>加速度 X</th><th>加速度 Y</th><th>加速度 Z</th><th>麦克风原值</th><th>峰峰值</th><th>均方根</th><th>经纬度</th>'+event_header+'</tr></thead>'
+            '<h2>查询结果</h2><span>共 '+str(total)+' 条 · 所有设备按生成时间倒序（含推算）；无时间基准的记录置后，按设备及生成序号倒序</span></div><div class="scroll"><table>'
+            '<thead><tr><th>设备</th><th>类型</th><th>接收时间（北京）</th><th>采集时间</th><th>横滚角 Roll (°)</th><th>俯仰角 Pitch (°)</th><th>麦克风原值</th><th>峰峰值</th><th>均方根</th><th>经纬度</th>'+event_header+'</tr></thead>'
             '<tbody>'+(''.join(render_row(r, show_event_number) for r in rows) or '<tr><td colspan="'+str(column_count)+'">当前条件下没有记录</td></tr>')+
             '</tbody></table></div><nav><span>'+ (link(p-1,"上一页") if p>1 else "")+'</span><span>第 '
             + str(p)+' / '+str(pages)+' 页</span><span>'+(link(p+1,"下一页") if p<pages else "")+'</span></nav></section>')

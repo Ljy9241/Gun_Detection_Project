@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+import re
 
 from fastapi.testclient import TestClient
 
@@ -52,6 +53,18 @@ def test_map_requires_three_fixes_per_boot_and_scopes_units(tmp_path, monkeypatc
     for i in (20, 21, 22):
         add(i, "unit-a", "a-1", "boot-live", kind="sensor",
             timestamp=f"2026-11-18 02:00:{i}")
+    for device in ("a-2", "a-3", "pilot-001"):
+        conn.execute("INSERT INTO devices VALUES(?,?,?)", (device, device, "unit-a"))
+    # Arrival order and sequence numbers must not override acquisition time.
+    add(30, "unit-a", "a-2", "boot-2", kind="sensor", valid=False,
+        timestamp="2026-11-18 03:00:03")
+    add(31, "unit-a", "a-1", "boot-a", kind="sensor", valid=False,
+        timestamp="2026-11-18 03:00:02")
+    add(32, "unit-a", "a-3", "boot-3", kind="sensor", valid=False,
+        timestamp="2026-11-18 03:00:01")
+    for i in (40, 41, 42):
+        add(i, "unit-a", "pilot-001", "boot-pilot", kind="sensor",
+            timestamp="2026-11-18 04:00:00")
     conn.commit()
     conn.close()
 
@@ -72,6 +85,19 @@ def test_map_requires_three_fixes_per_boot_and_scopes_units(tmp_path, monkeypatc
         assert '<th>接收时间（北京）</th><th>采集时间</th>' in list_page
         assert '<th>事件编号</th>' not in list_page
         assert '<td>射击事件（编号 7）</td>' in list_page
+        assert 'pilot-001' not in list_page
+        assert re.findall(r'<tr><td>([^<]+)</td>', list_page)[:3] == ['a-2', 'a-1', 'a-3']
+        assert '所有设备按生成时间倒序' in list_page
+        filtered = client.get('/viewer/?device=a-2').text
+        assert re.findall(r'<tr><td>([^<]+)</td>', filtered) == ['a-2']
+        hidden = client.get('/viewer/?device=pilot-001').text
+        assert '当前条件下没有记录' in hidden
+        monkeypatch.setattr(viewer, "PAGE_SIZE", 2)
+        first_page = client.get('/viewer/').text
+        second_page = client.get('/viewer/?p=2').text
+        assert re.findall(r'<tr><td>([^<]+)</td>', first_page) == ['a-2', 'a-1']
+        assert re.findall(r'<tr><td>([^<]+)</td>', second_page)[0] == 'a-3'
+        monkeypatch.setattr(viewer, "PAGE_SIZE", 25)
         sensor_page = client.get('/viewer/?kind=sensor').text
         assert '<th>事件编号</th>' not in sensor_page
         assert '<td>射击事件' not in sensor_page
@@ -81,7 +107,7 @@ def test_map_requires_three_fixes_per_boot_and_scopes_units(tmp_path, monkeypatc
         assert '<td>7</td>' in shot_page
         assert '<th>接收时间（北京）</th><th>采集时间</th>' in shot_page
         empty_page = client.get('/viewer/?kind=sensor&day=2000-01-01').text
-        assert 'colspan="11"' in empty_page
+        assert 'colspan="10"' in empty_page
         assert (list_page.index('<td>2026-11-18 01:00:10</td>')
                 < list_page.index('<td>2026-11-18 01:00:09</td>')
                 < list_page.index('<td>T+00:00:08</td>'))
@@ -99,3 +125,9 @@ def test_map_requires_three_fixes_per_boot_and_scopes_units(tmp_path, monkeypatc
         assert live["raw_count"] == 3 and len(live["points"]) == 3 and live["shots"] == []
         assert client.get("/viewer/map/track", params={**query, "boot": "boot-short"}).status_code == 404
         assert client.get("/viewer/map/track", params={"device": "b-1", "epoch": "epoch", "boot": "boot-b"}).status_code == 404
+
+        assert client.get("/viewer/map/track", params={"device": "pilot-001", "epoch": "epoch", "boot": "boot-pilot"}).status_code == 404
+        # Hiding is reversible and must not delete any historical data.
+        monkeypatch.setattr(viewer, "HIDDEN_DEVICES", ())
+        assert 'pilot-001' in client.get('/viewer/').text
+        assert any(item['device'] == 'pilot-001' for item in client.get('/viewer/map/sessions').json()['items'])

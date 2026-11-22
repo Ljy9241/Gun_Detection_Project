@@ -1,6 +1,8 @@
 #include "wifi_transport.h"
 #ifdef DEVICE_ARCHIVE_UPLOAD
 #include "archive_upload.h"
+#include "archive_time.h"
+#include "telemetry_tilt.h"
 #include <sys/time.h>
 #endif
 
@@ -114,6 +116,9 @@ TelemetryRecord WifiTransport::makeTelemetryRecord(const WifiTelemetry& telemetr
     record.accelX = telemetry.vibrationX;
     record.accelY = telemetry.vibrationY;
     record.accelZ = telemetry.vibrationZ;
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    storeTelemetryTilt(record, telemetry.tiltValid, telemetry.rollDegrees, telemetry.pitchDegrees);
+#endif
     record.micRaw = telemetry.micRaw;
     record.micP2p = telemetry.micPeakToPeak;
     record.micRms = telemetry.micRms;
@@ -167,6 +172,9 @@ void WifiTransport::setScheduledStandby(bool standby, uint32_t nowMs) {
 }
 
 void WifiTransport::update(uint32_t nowMs) {
+#ifdef DEVICE_ARCHIVE_UPLOAD
+    const bool archiveClockReady = captureArchiveTime(bootId_);
+#endif
     if (scheduledStandby_) return;
     const uint32_t spoolIntervalMs = lowPowerMode_
         ? config::LOW_POWER_SENSOR_RECORD_INTERVAL_MS
@@ -353,7 +361,7 @@ void WifiTransport::update(uint32_t nowMs) {
     }
 
 #ifdef DEVICE_ARCHIVE_UPLOAD
-    updateArchiveUpload(spool_);
+    if (archiveClockReady) updateArchiveUpload(spool_);
     return;
 #endif
     if (!ackListenerStarted_) {

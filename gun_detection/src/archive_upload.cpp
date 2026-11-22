@@ -1,6 +1,7 @@
 #ifdef DEVICE_ARCHIVE_UPLOAD
 #include "archive_upload.h"
 #include "archive_queue.h"
+#include "archive_time.h"
 #include "cloud_device_private.h"
 #include <esp_http_client.h>
 #include "system_config.h"
@@ -10,6 +11,27 @@
 
 namespace {
 ArchiveQueue batch;
+struct UploadTime {
+    char timestamp[20] = {};
+    TelemetryTimeAnchor anchor;
+    bool inferred = false;
+};
+UploadTime uploadTimes[ArchiveQueue::capacity];
+bool timesPrepared = false;
+
+void prepareTimes() {
+    if (timesPrepared) return;
+    for (size_t i = 0; i < batch.count; ++i) {
+        const auto& r = batch.rows[i];
+        auto& t = uploadTimes[i];
+        t = {};
+        memcpy(t.timestamp, r.timestamp, sizeof t.timestamp);
+        if (!strncmp(r.timestamp, "T+", 2) && readArchiveTime(r.bootId, t.anchor))
+            t.inferred = inferTelemetryTime(t.anchor, r.bootId, r.uptimeMs,
+                                           t.timestamp, sizeof t.timestamp);
+    }
+    timesPrepared = true;
+}
 QueueHandle_t results = nullptr;
 QueueHandle_t requests = nullptr;
 bool workerStarted = false;
@@ -84,10 +106,10 @@ bool postBatch(UploadResult& result) {
     char id[64];
     snprintf(id, sizeof id, "%c-%016llx-%llu-%llu", batch.priority ? 's' : 'q', batch.rows[0].bootId, batch.rows[0].sequence,
              batch.rows[batch.count - 1].sequence);
-    static char body[16384];
+    static char body[32768];
     int pos = snprintf(body, sizeof body,
         "{\"schemaVersion\":1,\"deviceId\":\"%s\",\"storageEpoch\":\"%s\",\"batchId\":\"%s\","
-        "\"format\":\"compact-v2-string-u64\",\"records\":[", archiveDevice, archiveEpoch, id);
+        "\"format\":\"compact-v4-time\",\"records\":[", archiveDevice, archiveEpoch, id);
     if (pos <= 0 || size_t(pos) >= sizeof body) return false;
     for (size_t i = 0; i < batch.count; ++i) {
         const auto& r = batch.rows[i];
@@ -96,10 +118,25 @@ bool postBatch(UploadResult& result) {
             snprintf(lat, sizeof lat, "%.7f", r.latitude);
             snprintf(lon, sizeof lon, "%.7f", r.longitude);
         }
+        char axes[64];
+        const bool tilt = r.reserved[0] == 1;
+        if (tilt && r.accelZ == 1) {
+            snprintf(axes, sizeof axes, "%.2f,%.2f,true", r.accelX / 100.0 - 180.0,
+                     r.accelY / 100.0 - 90.0);
+        } else if (tilt) {
+            strcpy(axes, "null,null,false");
+        } else {
+            snprintf(axes, sizeof axes, "%u,%u,%u", r.accelX, r.accelY, r.accelZ);
+        }
+        const auto& t = uploadTimes[i];
+        char provenance[112] = "null,null,null";
+        if (t.inferred) snprintf(provenance, sizeof provenance, "\"%.19s\",\"%llu\",\"%llu\"",
+                                 r.timestamp, t.anchor.utcMs, t.anchor.uptimeMs);
         int size = snprintf(body + pos, sizeof body - pos,
-            "%s[\"%llu\",\"%.19s\",%u,%u,%u,%u,%u,%.3f,%s,%s,\"%016llx\",\"%llu\",%lu,%u]",
-            i ? "," : "", r.sequence, r.timestamp, r.accelX, r.accelY, r.accelZ, r.micRaw,
-            r.micP2p, r.micRms, lat, lon, r.bootId, r.uptimeMs, (unsigned long)r.shotId, r.recordKind);
+            "%s[\"%llu\",\"%.19s\",%s,%u,%u,%.3f,%s,%s,\"%016llx\",\"%llu\",%lu,%u,%u,%s]",
+            i ? "," : "", r.sequence, t.timestamp, axes, r.micRaw,
+            r.micP2p, r.micRms, lat, lon, r.bootId, r.uptimeMs, (unsigned long)r.shotId,
+            r.recordKind, tilt ? 1 : 0, provenance);
         if (size < 0 || size_t(size) + 3 > sizeof body - pos) return false;
         pos += size;
     }
@@ -198,6 +235,7 @@ void updateArchiveUpload(TelemetrySpool& spool) {
             const size_t count = batch.count;
             const uint64_t through = batch.rows[count - 1].sequence;
             ok = batch.confirm(spool);
+            if (ok) timesPrepared = false;
             if (ok && !batch.priority) speedFifo += count;
             if (ok) Serial.printf("%s committed: %u records through %llu; flash_pending=%llu inserted=%lu duplicates=%lu http_ms=%lu new_connections=%lu\n",
                 batch.priority ? "Shot priority" : "Archive", unsigned(count), through,
@@ -231,6 +269,7 @@ void updateArchiveUpload(TelemetrySpool& spool) {
     if (!batch.count && spool.lastSequence() == idleSequence &&
         int32_t(millis() - nextIdlePoll) < 0) return;
     if (batch.prepare(spool)) {
+        prepareTimes();
         idleSequence = UINT64_MAX;
         busy = startBatch();
     } else {

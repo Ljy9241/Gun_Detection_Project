@@ -8,7 +8,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 
 from .database import batches, devices, outbox, readers, records, shots, tenants
-from .protocol import IDENTIFIER, digest, normalize
+from .protocol import IDENTIFIER, digest, normalize, canonical_payload
 
 
 class ServiceError(Exception):
@@ -67,9 +67,15 @@ def authenticated_tenant(connection, token):
     return tenant
 
 
+def shot_display_payload(payload):
+    keys = ('shotId', 'timestamp', 'uptimeMs', 'gpsValid', 'latitude', 'longitude',
+            'original_timestamp', 'timestamp_source', 'time_anchor')
+    return {key: payload[key] for key in keys if key in payload}
+
+
 def ingest(db, token, batch):
     normalized = normalize(batch)
-    batch_hash = digest([item['payload'] for item in normalized])
+    batch_hash = digest([canonical_payload(item['payload']) for item in normalized])
     inserted, duplicates = 0, 0
     received_at = now()
     with db.engine.begin() as connection:
@@ -85,11 +91,20 @@ def ingest(db, token, batch):
             payload = item['payload']
             identity = dict(device_id=device['id'], storage_epoch=batch.storageEpoch,
                             boot_id=payload['bootId'], sequence=payload['sequence'])
-            existing = connection.execute(select(records.c.id, records.c.payload_hash).filter_by(
+            existing = connection.execute(select(records.c.id, records.c.payload_hash, records.c.occurred_at).filter_by(
                 **identity)).mappings().first()
             if existing:
                 if existing['payload_hash'] != item['payload_hash']:
                     raise ServiceError(409, 'Record identity was already used for different content')
+                # Enrich a legacy T+ record without changing its original hash,
+                # receipt, identity or event count. A stored calendar time is frozen.
+                if existing['occurred_at'] is None and payload.get('timestamp_source') == 'inferred':
+                    dates = dict(occurred_at=item['occurred_at'], event_date=payload['timestamp'][:10])
+                    connection.execute(records.update().where(records.c.id == existing['id']).values(
+                        **dates, payload=payload))
+                    if payload['shotId']:
+                        connection.execute(shots.update().where(shots.c.record_id == existing['id']).values(
+                            **dates, payload=shot_display_payload(payload)))
                 duplicates += 1
                 continue
             record_id = uuid4().hex
@@ -103,7 +118,8 @@ def ingest(db, token, batch):
                                      boot_id=payload['bootId'], shot_id=payload['shotId'])
                 shot_payload = {key: payload[key] for key in (
                     'shotId', 'timestamp', 'uptimeMs', 'gpsValid', 'latitude', 'longitude')}
-                shot_hash = digest(shot_payload)
+                shot_hash = digest({key: canonical_payload(payload)[key] for key in shot_payload})
+                shot_payload = shot_display_payload(payload)
                 existing_shot = connection.execute(select(shots.c.payload_hash).filter_by(
                     **shot_identity)).scalar_one_or_none()
                 if existing_shot and existing_shot != shot_hash:

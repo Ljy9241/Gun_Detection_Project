@@ -578,6 +578,9 @@ void loop() {
         telemetry.vibrationX = vibrateDetection.rawX();
         telemetry.vibrationY = vibrateDetection.rawY();
         telemetry.vibrationZ = vibrateDetection.rawZ();
+        telemetry.tiltValid = vibrateDetection.angleValid();
+        telemetry.rollDegrees = vibrateDetection.rollDegrees();
+        telemetry.pitchDegrees = vibrateDetection.pitchDegrees();
         portEXIT_CRITICAL(&sensorStateMux);
         gpsSnapshot = wifiTransport.makeTelemetryRecord(telemetry);
         gpsSnapshotPending = true;
