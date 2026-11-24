@@ -21,7 +21,7 @@ void MotionDirectionDetector::processSample(uint16_t x, uint16_t y, uint16_t z, 
     if (hasInput_ && (nowUs <= lastInputUs_ || nowUs - lastInputUs_ > MAX_GAP_US)) reset();
     lastInputUs_ = nowUs;
     hasInput_ = true;
-    // 1 kHz ADC 输入每 50 ms 取一个完整三轴样本，不对幅度求平均。
+    // 按配置间隔取一个完整三轴样本，不对幅度求平均。
     if (hasProcessed_ && nowUs - lastProcessedUs_ < SAMPLE_INTERVAL_US) return;
     const float dt = hasProcessed_ ? (nowUs - lastProcessedUs_) / 1000000.0F : 0;
     lastProcessedUs_ = nowUs;
@@ -51,7 +51,7 @@ void MotionDirectionDetector::processSample(uint16_t x, uint16_t y, uint16_t z, 
                 if (sample.a[j] > hi[j]) hi[j] = sample.a[j];
             }
         }
-        for (int j = 0; j < 3; ++j) if (hi[j] - lo[j] >= 100) return;
+        for (int j = 0; j < 3; ++j) if (hi[j] - lo[j] >= CALIBRATION_RANGE) return;
         for (int j = 0; j < 3; ++j) baseline_[j] = sums[j] / calibrationCount_;
         calibrated_ = true;
         return;
@@ -102,10 +102,14 @@ void MotionDirectionDetector::processSample(uint16_t x, uint16_t y, uint16_t z, 
     const bool timedOut = nowUs - current_.startUs >= MAX_DURATION_US;
     if (!timedOut && !(quiet_ && nowUs - quietSinceUs_ >= QUIET_US)) return;
     const float total = current_.energyX + current_.energyY + current_.energyZ;
-    if (!timedOut && strongSamples_ >= 3 && current_.peak >= MIN_PEAK && total > 0) {
-        if (current_.energyZ >= DOMINANCE * total && current_.energyZ >= AXIS_RATIO * current_.energyX)
+    const auto matches = [&](const DirectionSensitivity& settings, float mainEnergy, float otherEnergy) {
+        return strongSamples_ >= settings.minStrongSamples && current_.peak >= settings.minPeak &&
+               mainEnergy >= settings.dominance * total && mainEnergy >= settings.axisRatio * otherEnergy;
+    };
+    if (!timedOut && total > 0) {
+        if (matches(HORIZONTAL, current_.energyZ, current_.energyX))
             current_.direction = MotionDirection::Horizontal;
-        else if (current_.energyX >= DOMINANCE * total && current_.energyX >= AXIS_RATIO * current_.energyZ)
+        else if (matches(VERTICAL, current_.energyX, current_.energyZ))
             current_.direction = MotionDirection::Vertical;
     }
     current_.timestampUs = nowUs;

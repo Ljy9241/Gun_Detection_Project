@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "motion_config.h"
 
 #ifndef GUN_CAPACITY_TEST_MODE
 #define GUN_CAPACITY_TEST_MODE 0
@@ -20,7 +21,7 @@ inline constexpr bool CAPACITY_TEST_MODE = GUN_CAPACITY_TEST_MODE != 0;
 inline constexpr bool NIGHT_STANDBY_ENABLED = true;//是否启用定时休眠
 inline constexpr uint8_t NIGHT_STANDBY_END_HOUR = 10;       // 几点工作：小时 0~23。
 inline constexpr uint8_t NIGHT_STANDBY_END_MIN = 00;        // 几点工作：分钟 0~59。
-inline constexpr uint8_t NIGHT_STANDBY_START_HOUR = 23;    // 几点休眠：小时 0~23。
+inline constexpr uint8_t NIGHT_STANDBY_START_HOUR = 22;    // 几点休眠：小时 0~23。
 inline constexpr uint8_t NIGHT_STANDBY_START_MIN = 00;      // 几点休眠：分钟 0~59。
 static_assert(NIGHT_STANDBY_START_HOUR < 24 && NIGHT_STANDBY_END_HOUR < 24 &&
               NIGHT_STANDBY_START_MIN < 60 && NIGHT_STANDBY_END_MIN < 60,
@@ -71,7 +72,7 @@ inline constexpr float VIBRATE_QUIET_THRESHOLD_COUNTS = 90.0F;
 inline constexpr uint8_t VIBRATE_TRIGGER_SAMPLES = 2;
 inline constexpr uint32_t VIBRATE_RETRIGGER_US = 50000;
 
-// 射击记录改由横向动作触发；方向识别阈值在 motion_direction.h 中配置。
+// 射击记录改由横向动作触发；横向/竖向灵敏度及共用分段参数在 motion_config.h 中配置。
 
 // Wi-Fi 热点配置；电脑地址通过局域网 UDP 自动发现。
 inline constexpr char WIFI_SSID[] = "ljy";
@@ -102,7 +103,7 @@ inline constexpr uint8_t TELEMETRY_FLASH_BATCH_RECORDS = 20;      // RAM 累积 
 inline constexpr uint32_t UDP_STATUS_INTERVAL_MS = 250;           // UDP 状态包每秒发送 4 次；降低主循环及 LittleFS 状态查询负担。
 inline constexpr uint32_t UDP_EVENT_RETRY_INTERVAL_MS = 100;      // 发送失败的事件至少间隔 100 毫秒重试，避免 UDP 错误时忙循环。
 inline constexpr uint32_t UDP_TELEMETRY_RETRY_INTERVAL_MS = 500;  // 遥测批次失败或等待 ACK 时的重试间隔，单位：毫秒。
-inline constexpr float LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS = 50.0F; // 相邻采样任意单轴变化绝对值超过此值视为运动，单位：ADC counts。
+inline constexpr float LOW_POWER_MOTION_DELTA_THRESHOLD_COUNTS = 150.0F; // 相邻采样任意单轴变化绝对值超过此值视为运动，单位：ADC counts。
 inline constexpr uint32_t LOW_POWER_STILLNESS_MS = 5000;              // 静止持续此时长后进入低功耗，单位：毫秒。
 inline constexpr bool NORMAL_GPS_ALWAYS_ON = true;                 // 普通模式：true GPS 常开；false 按下方周期启停。低功耗始终按周期启停。
 inline constexpr uint32_t GPS_CYCLE_MS = 600000;                     // 周期模式下 GPS 启动间隔 10 分钟。

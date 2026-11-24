@@ -31,8 +31,6 @@ static_assert(sizeof(TelemetryRecord) == 90 && offsetof(TelemetryRecord, bootId)
 class TelemetrySpool {
 public:
 #ifdef DEVICE_ARCHIVE_UPLOAD
-    bool sealCollection();
-    uint64_t sealedThrough() const { return sealedThrough_; }
     uint64_t ordinaryThrough() const { return ordinaryThrough_; }
     uint64_t gpsThrough() const { return gpsThrough_; }
     bool confirmOrdinary(uint64_t through);
@@ -78,7 +76,7 @@ public:
 
 private:
 #ifdef DEVICE_ARCHIVE_UPLOAD
-    uint64_t sealedThrough_ = 0, ordinaryThrough_ = 0, gpsThrough_ = 0;
+    uint64_t ordinaryThrough_ = 0, gpsThrough_ = 0;
     uint64_t segmentLast_[512] = {};
     uint64_t segmentLastShot_[512] = {};
     static bool shotRecord(const TelemetryRecord& row) { return row.shotId != 0; }

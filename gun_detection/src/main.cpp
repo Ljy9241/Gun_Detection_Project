@@ -333,14 +333,6 @@ static bool serviceNightStandby(uint32_t nowMs) {
         if (gpsSnapshotPending) {
             Serial.println("Night standby: uncommitted GPS snapshot retained in RAM.");
         }
-#ifdef DEVICE_ARCHIVE_UPLOAD
-        // Persist the collection boundary for diagnostics; live uploads do not wait for it.
-        if (wifiTransport.pendingRamRecords() == 0 && !gpsSnapshotPending && !wifiTransport.sealCollection()) {
-            Serial.println("Collection end marker could not be persisted; retrying before standby.");
-            delay(100);
-            return true;
-        }
-#endif
         // Hold both peripheral enable pins LOW throughout light sleep.
         gpio_hold_en(static_cast<gpio_num_t>(config::MMA_SLEEP_PIN));
         gpio_hold_en(static_cast<gpio_num_t>(config::GPS_ENABLE_PIN));

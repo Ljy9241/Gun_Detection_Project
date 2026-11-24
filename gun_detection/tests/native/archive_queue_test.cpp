@@ -198,12 +198,11 @@ int main() {
     {
         TelemetrySpool spool;
         assert(spool.begin());
-        // Regression: unsealed shot + invalid GPS + legacy row must all upload.
+        // Regression: shot + invalid GPS + legacy row must all upload without an end marker.
         assert(spool.append(row()));
         assert(spool.append(row(2)));
         assert(spool.append(row(0, 1)));
         assert(spool.append(row(0)));
-        assert(spool.sealedThrough() == 0);
         // Watermarks from the old firmware must not gate the new complete queue.
         assert(spool.confirmOrdinary(spool.lastSequence()));
         assert(spool.confirmGps(spool.lastSequence()));

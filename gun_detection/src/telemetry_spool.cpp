@@ -153,7 +153,6 @@ bool TelemetrySpool::begin(bool capacityTestMode) {
     }
     acknowledgedSequence_ = preferences.getULong64("acked", 0);
 #ifdef DEVICE_ARCHIVE_UPLOAD
-    sealedThrough_ = preferences.getULong64("closedSeq", 0);
     ordinaryThrough_ = preferences.getULong64("plainSeq", 0);
     gpsThrough_ = preferences.getULong64("gpsSeq", 0);
 #endif
@@ -686,13 +685,6 @@ bool TelemetrySpool::acknowledgeArchiveBatch(const TelemetryRecord* rows, size_t
                       (unsigned long)batchReclaimedFiles_, batchReclaimedBytes_, acknowledgedSequence_);
     }
     return ok;
-}
-
-bool TelemetrySpool::sealCollection() {
-    const uint64_t end = lastSequence();
-    if (!mounted_ || preferences.putULong64("closedSeq", end) != sizeof(end)) return false;
-    sealedThrough_ = end;
-    return true;
 }
 
 bool TelemetrySpool::confirmOrdinary(uint64_t through) {
