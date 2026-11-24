@@ -1,4 +1,6 @@
 """Single-worker, read-only browser application for the existing SQLite receiver."""
+import csv
+import io
 import hashlib
 import secrets
 import sqlite3
@@ -12,12 +14,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 BASE = "/viewer/"
 COOKIE = "__Secure-unit-view"
-PAGE_SIZE = 25
+PAGE_SIZE = 100
+PAGE_SIZES = (25, 50, 100, 200)
 KINDS = {"sensor": "普通采样", "shot": "射击事件"}
 # Hide retired test devices in the viewer without deleting their stored records.
 # Set VIEWER_HIDDEN_DEVICES to an empty string to show every device again.
@@ -244,62 +247,189 @@ def render_row(row, show_event_number=False):
     return "<tr>" + "".join("<td>" + h(value) + "</td>" for value in values) + "</tr>"
 
 
+RECORD_ORDER = (" ORDER BY (event_date IS NULL),"
+                " CASE WHEN event_date IS NOT NULL THEN json_extract(payload,'$.timestamp') END DESC,"
+                " device_id,storage_epoch,LENGTH(sequence) DESC,sequence DESC,id DESC")
+
+
+def record_filters(tenant, device, day, kind, start, end, snapshot):
+    if day:
+        day = date.fromisoformat(day).isoformat()
+    if kind and kind not in KINDS:
+        raise ValueError('无效记录类型')
+    bounds = []
+    for value in (start, end):
+        if not value:
+            bounds.append('')
+            continue
+        stamp = datetime.fromisoformat(value)
+        if stamp.tzinfo is not None or len(value) not in (16, 19):
+            raise ValueError('时间范围须使用北京时间，精确到分钟或秒')
+        bounds.append(stamp.strftime('%Y-%m-%d %H:%M:%S'))
+    start, end = bounds
+    if start and end and start > end:
+        raise ValueError('开始时间不能晚于结束时间')
+    now = datetime.now(timezone.utc)
+    stamp = datetime.fromisoformat(snapshot) if snapshot else now
+    if stamp.tzinfo is None:
+        raise ValueError('无效分页快照')
+    snapshot = min(stamp.astimezone(timezone.utc), now).isoformat()
+    clauses = ['tenant_id=?', 'received_at<=?', "kind IN ('sensor','shot')",
+               'device_id NOT IN (SELECT value FROM json_each(?))']
+    args = [tenant, snapshot, json.dumps(HIDDEN_DEVICES)]
+    for column, value in (('device_id', device), ('event_date', day), ('kind', kind)):
+        if value:
+            clauses.append(column + '=?')
+            args.append(value)
+    for operator, value in (('>=', start), ('<=', end)):
+        if value:
+            clauses.append("event_date IS NOT NULL AND json_extract(payload,'$.timestamp')" + operator + '?')
+            args.append(value)
+    return ' AND '.join(clauses), args, dict(device=device, day=day, kind=kind,
+        start=start.replace(' ', 'T'), end=end.replace(' ', 'T'), snapshot=snapshot)
+
+
+def hidden_inputs(params):
+    return ''.join('<input type="hidden" name="'+h(key)+'" value="'+h(value)+'">'
+                   for key, value in params.items())
+
+
 @app.get(BASE)
-def view(request: Request, device: str = "", day: str = "", kind: str = "", p: int = 1, snapshot: str = ""):
-    digest, expiry = sessions.get(request.cookies.get(COOKIE), (None, 0))
-    if expiry <= time.monotonic():
+def view(request: Request, device: str = '', day: str = '', kind: str = '', p: int = 1,
+         snapshot: str = '', start: str = '', end: str = '', page_size: int | None = None,
+         auto_refresh: int = 0):
+    unit = authorized_unit(request)
+    if not unit:
         return login_form()
+    if kind == 'gps':
+        return RedirectResponse(BASE + 'map', status_code=303)
+    try:
+        if page_size is not None and page_size not in PAGE_SIZES:
+            raise ValueError('每页条数请选择25、50、100或200')
+        size = PAGE_SIZE if page_size is None else page_size
+        if auto_refresh not in (0, 1):
+            raise ValueError('无效刷新设置')
+        where, args, filters = record_filters(unit['id'], device, day, kind, start, end, snapshot)
+    except ValueError as exc:
+        return page('<p>'+h(str(exc))+'</p><a href="/viewer/">返回记录</a>', unit['name'], 400)
     with closing(db()) as conn:
-        conn.execute("BEGIN")
-        unit = identity(conn, digest)
-        if not unit:
-            return login_form("查询权限已失效")
-        if kind == "gps":
-            return RedirectResponse(BASE + "map", status_code=303)
-        devices = conn.execute("SELECT id,name FROM devices WHERE tenant_id=? AND id NOT IN (SELECT value FROM json_each(?)) ORDER BY id",(unit["id"], json.dumps(HIDDEN_DEVICES))).fetchall()
-        try:
-            if day: day = date.fromisoformat(day).isoformat()
-            if kind and kind not in KINDS: raise ValueError()
-            if snapshot:
-                stamp = datetime.fromisoformat(snapshot)
-                if stamp.tzinfo is None: raise ValueError()
-            else:
-                stamp = datetime.now(timezone.utc)
-        except ValueError:
-            return page('<p>筛选条件无效。</p><a href="/viewer/">返回记录</a>', unit["name"], 400)
-        snapshot = min(stamp.astimezone(timezone.utc), datetime.now(timezone.utc)).isoformat()
-        clauses = ["tenant_id=?", "received_at<=?", "kind IN ('sensor','shot')",
-                   "device_id NOT IN (SELECT value FROM json_each(?))"]
-        args = [unit["id"], snapshot, json.dumps(HIDDEN_DEVICES)]
-        for column, value in (("device_id",device),("event_date",day),("kind",kind)):
-            if value:
-                clauses.append(column+"=?")
-                args.append(value)
-        where = " AND ".join(clauses)
-        total = conn.execute("SELECT count(*) FROM records WHERE "+where,args).fetchone()[0]
-        pages = max(1,(total+PAGE_SIZE-1)//PAGE_SIZE)
-        p = max(1,min(p,pages))
-        rows = conn.execute("SELECT device_id,kind,received_at,payload FROM records WHERE "+where+
-            " ORDER BY (event_date IS NULL),"
-            " CASE WHEN event_date IS NOT NULL THEN json_extract(payload,'$.timestamp') END DESC,"
-            " device_id,storage_epoch,LENGTH(sequence) DESC,sequence DESC,id DESC"
-            " LIMIT ? OFFSET ?",args+[PAGE_SIZE,(p-1)*PAGE_SIZE]).fetchall()
-    devopts = option("", "全部设备", device) + "".join(option(d["id"], d["name"]+" · "+d["id"], device) for d in devices)
-    kinds = option("", "全部类型", kind) + "".join(option(k,v,kind) for k,v in KINDS.items())
-    show_event_number = kind == "shot"
+        conn.execute('BEGIN')
+        devices = conn.execute('SELECT id,name FROM devices WHERE tenant_id=? AND id NOT IN '
+            '(SELECT value FROM json_each(?)) ORDER BY id', (unit['id'], json.dumps(HIDDEN_DEVICES))).fetchall()
+        total = conn.execute('SELECT count(*) FROM records WHERE '+where, args).fetchone()[0]
+        pages = max(1, (total + size - 1) // size)
+        p = max(1, min(p, pages))
+        rows = conn.execute('SELECT device_id,kind,received_at,payload FROM records WHERE '+where+
+                            RECORD_ORDER+' LIMIT ? OFFSET ?', args+[size, (p-1)*size]).fetchall()
+    active_refresh = bool(auto_refresh and p == 1)
+    nav_params = dict(filters, page_size=size)
+    def link(number, label):
+        return '<a href="?'+h(urlencode(dict(nav_params, p=number)))+'">'+label+'</a>'
+    devopts = option('', '全部设备', device) + ''.join(option(d['id'], d['name']+' · '+d['id'], device) for d in devices)
+    kinds = option('', '全部类型', kind) + ''.join(option(k, v, kind) for k, v in KINDS.items())
+    sizes = ''.join(option(str(n), str(n)+'条', str(size)) for n in PAGE_SIZES)
+    show_event_number = kind == 'shot'
     event_header = '<th>事件编号</th>' if show_event_number else ''
-    column_count = 11 if show_event_number else 10
-    def link(number,label):
-        params=urlencode(dict(device=device,day=day,kind=kind,p=number,snapshot=snapshot))
-        return '<a href="?'+h(params)+'">'+label+'</a>'
-    body = ('<h1>设备记录</h1><form class="panel filters" method="get" action="/viewer/">'
-            '<label>设备<select name="device">'+devopts+'</select></label>'
-            '<label>采集日期<input type="date" name="day" value="'+h(day)+'"></label>'
-            '<label>记录类型<select name="kind">'+kinds+'</select></label><button>查询</button>'
-            '<a href="/viewer/">查看全部</a><a href="/viewer/map">GPS 轨迹地图</a></form><section class="panel"><div class="summary">'
-            '<h2>查询结果</h2><span>共 '+str(total)+' 条 · 所有设备按生成时间倒序（含推算）；无时间基准的记录置后，按设备及生成序号倒序</span></div><div class="scroll"><table>'
-            '<thead><tr><th>设备</th><th>类型</th><th>接收时间（北京）</th><th>采集时间</th><th>横滚角 Roll (°)</th><th>俯仰角 Pitch (°)</th><th>麦克风原值</th><th>峰峰值</th><th>均方根</th><th>经纬度</th>'+event_header+'</tr></thead>'
-            '<tbody>'+(''.join(render_row(r, show_event_number) for r in rows) or '<tr><td colspan="'+str(column_count)+'">当前条件下没有记录</td></tr>')+
-            '</tbody></table></div><nav><span>'+ (link(p-1,"上一页") if p>1 else "")+'</span><span>第 '
-            + str(p)+' / '+str(pages)+' 页</span><span>'+(link(p+1,"下一页") if p<pages else "")+'</span></nav></section>')
-    return page(body, unit["name"])
+    export_url = BASE+'export.csv?'+urlencode(filters)
+    latest_url = BASE+'?'+urlencode({k: v for k, v in nav_params.items() if k != 'snapshot'})
+    refresh_url = latest_url+'&auto_refresh=1'
+    body = ('<h1>设备记录</h1><form id="filters" class="panel filters" method="get" action="/viewer/">'
+        '<label>设备<select name="device">'+devopts+'</select></label>'
+        '<label>采集日期<input type="date" name="day" value="'+h(filters['day'])+'"></label>'
+        '<label>开始时间（北京）<input type="datetime-local" step="1" name="start" value="'+h(filters['start'])+'"></label>'
+        '<label>结束时间（北京）<input type="datetime-local" step="1" name="end" value="'+h(filters['end'])+'"></label>'
+        '<label>记录类型<select name="kind">'+kinds+'</select></label>'
+        '<label>每页条数<select name="page_size">'+sizes+'</select></label>'
+        '<label><span><input id="auto-refresh" type="checkbox" name="auto_refresh" value="1"'+
+        (' checked' if active_refresh else '')+'> 每10秒自动刷新（第一页）</span></label>'
+        '<button>查询</button><a href="/viewer/">重置筛选</a><a href="/viewer/map">GPS 轨迹地图</a></form>'
+        '<p>按设备生成时间筛选，包含推算时间；起止时间均包含。设置时间范围后，不含尚无时间基准的记录。</p>'
+        '<section class="panel"><div class="summary"><h2>查询结果</h2><span>共 '+str(total)+' 条 · 每页 '+str(size)+' 条</span>'
+        '<a href="'+h(latest_url)+'">查看最新</a><a href="'+h(export_url)+'">导出筛选结果 CSV（全部页）</a></div>'
+        '<p>所有设备按生成时间倒序（含推算）；无时间基准的记录置后，按设备及生成序号倒序。</p>'
+        '<div class="scroll"><table><thead><tr><th>设备</th><th>类型</th><th>接收时间（北京）</th><th>采集时间</th>'
+        '<th>横滚角 Roll (°)</th><th>俯仰角 Pitch (°)</th><th>麦克风原值</th><th>峰峰值</th><th>均方根</th><th>经纬度</th>'+
+        event_header+'</tr></thead><tbody>'+(''.join(render_row(r, show_event_number) for r in rows) or
+        '<tr><td colspan="'+str(11 if show_event_number else 10)+'">当前条件下没有记录</td></tr>')+
+        '</tbody></table></div><nav><span>'+(link(1, '首页')+' · '+link(p-1, '上一页') if p > 1 else '')+
+        '</span><span>第 '+str(p)+' / '+str(pages)+' 页</span><span>'+
+        (link(p+1, '下一页')+' · '+link(pages, '末页') if p < pages else '')+'</span>'
+        '<form class="filters" method="get" action="/viewer/">'+hidden_inputs(nav_params)+
+        '<label>跳转到页<input type="number" name="p" min="1" max="'+str(pages)+'" value="'+str(p)+'" required></label>'
+        '<button>跳转</button></form></nav></section>')
+    # Nonce-protected script: pause refresh immediately while editing any filter.
+    nonce = secrets.token_urlsafe(18)
+    body += '<div id="refresh-config" data-url="'+h(refresh_url)+'" data-active="'+('1' if active_refresh else '0')+'"></div>'
+    body += '<script nonce="'+nonce+'">'+VIEWER_REFRESH_JS+'</script>'
+    response = page(body, unit['name'])
+    response.headers['Content-Security-Policy'] = ("default-src 'none'; script-src 'nonce-"+nonce+
+        "'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+    return response
+
+
+VIEWER_REFRESH_JS = """
+const form = document.getElementById('filters');
+const checkbox = document.getElementById('auto-refresh');
+const config = document.getElementById('refresh-config');
+let timer;
+if (config.dataset.active === '1') {
+    timer = setInterval(() => {
+        if (!document.hidden && checkbox.checked) location.replace(config.dataset.url);
+    }, 10000);
+}
+form.addEventListener('input', () => clearInterval(timer));
+form.addEventListener('change', () => clearInterval(timer));
+checkbox.addEventListener('change', () => {
+    clearInterval(timer);
+    if (checkbox.checked) form.requestSubmit();
+});
+"""
+
+
+def csv_cell(value):
+    # Preserve numeric values; prevent strings from becoming spreadsheet formulas.
+    if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
+        return "'" + value
+    return value
+
+
+@app.get(BASE + 'export.csv')
+def export_csv(request: Request, device: str = '', day: str = '', kind: str = '',
+               start: str = '', end: str = '', snapshot: str = ''):
+    unit = authorized_unit(request)
+    if not unit:
+        return login_form()
+    try:
+        where, args, _ = record_filters(unit['id'], device, day, kind, start, end, snapshot)
+    except ValueError as exc:
+        return page('<p>'+h(str(exc))+'</p>', unit['name'], 400)
+    def generate():
+        buffer = io.StringIO(newline='')
+        writer = csv.writer(buffer)
+        def line(values):
+            buffer.seek(0)
+            buffer.truncate(0)
+            writer.writerow([csv_cell(value) for value in values])
+            return buffer.getvalue().encode('utf-8')
+        with closing(db()) as conn:
+            conn.execute('BEGIN')
+            cursor = conn.execute('SELECT * FROM records WHERE '+where+RECORD_ORDER, args)
+            yield b'\xef\xbb\xbf' + line(['设备', '类型', '接收时间（北京）', '生成时间', '时间来源', '原始时间',
+                'Roll（度）', 'Pitch（度）', '麦克风原值', '峰峰值', '均方根', '纬度', '经度',
+                '事件编号', '存储批次', '上电标识', '生成序号', '上电毫秒'])
+            for row in cursor:
+                payload = json.loads(row['payload'])
+                inferred = payload.get('timestamp_source') == 'inferred'
+                sensor = row['kind'] == 'sensor'
+                angles = sensor and payload.get('tilt_valid')
+                gps = payload.get('gpsValid')
+                yield line([row['device_id'], KINDS.get(row['kind'], row['kind']),
+                    datetime.fromisoformat(row['received_at']).astimezone(TZ).strftime('%Y-%m-%d %H:%M:%S'),
+                    payload.get('timestamp', ''), '推算' if inferred else ('已校时' if row['event_date'] else '未校时'),
+                    payload.get('original_timestamp', payload.get('timestamp', '')),
+                    payload.get('roll_deg') if angles else '', payload.get('pitch_deg') if angles else '',
+                    *[payload.get(key, '') if sensor else '' for key in ('mic_raw', 'mic_p2p', 'mic_rms')],
+                    payload.get('latitude', '') if gps else '', payload.get('longitude', '') if gps else '',
+                    payload.get('shotId') or '', row['storage_epoch'], row['boot_id'], row['sequence'], row['uptime_ms']])
+    return StreamingResponse(generate(), media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': 'attachment; filename="device-records.csv"'})
